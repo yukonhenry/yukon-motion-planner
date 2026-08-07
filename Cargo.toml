@@ -1,0 +1,22 @@
+[package]
+name = "yukon_motion_planner"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [".", "migration"]
+
+[dependencies]
+axum = "0.8.9"
+dotenvy = "0.15.7"
+sea-orm = { version = "2.0.0", features = ["sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono", "with-json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+migration = { path = "migration" }
+
+[dev-dependencies]
+reqwest = { version = "0.13.4", features = ["json"] }
+

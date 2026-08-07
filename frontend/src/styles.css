@@ -1,0 +1,409 @@
+:root {
+  --bg: #0f1117;
+  --panel: #181b24;
+  --border: #2a2f3d;
+  --text: #e6e8ee;
+  --muted: #8b93a7;
+  --accent: #4c8dff;
+  --danger: #e2564a;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+h1 {
+  font-size: 17px;
+  margin: 0;
+}
+
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.panel {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+}
+
+/* A checkbox reads across, not down — overrides the stacked label-above-field default. */
+.toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* Undoes the text-field styling above, which would otherwise render the box as a padded
+   dark rectangle with no visible tick. */
+.toggle input {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 0;
+  background: none;
+  border: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input,
+select {
+  background: #11141c;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 9px;
+  font: inherit;
+  width: 100%;
+}
+
+select {
+  flex: 1;
+  min-width: 0;
+}
+
+button {
+  background: #232838;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 12px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+button.subtle {
+  background: transparent;
+}
+
+.muted {
+  color: var(--muted);
+  margin: 0;
+}
+
+.hint {
+  font-size: 12px;
+}
+
+.stage {
+  padding: 24px;
+  overflow: auto;
+}
+
+.status {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid;
+}
+
+.status--error {
+  border-color: var(--danger);
+  background: #2a1614;
+  color: #ffb3ab;
+}
+
+/* --- canvas --- */
+
+.canvas {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  touch-action: none; /* let pointer drags work without the browser scrolling instead */
+  display: block;
+}
+
+/* Drawing a polygon and picking a route endpoint both mean "click a cell". */
+.canvas--placing {
+  cursor: crosshair;
+}
+
+.canvas__bg {
+  fill: #12151d;
+}
+
+.canvas__grid {
+  stroke: #262b38;
+  stroke-width: 1;
+  fill: none;
+}
+
+.obstacle {
+  stroke-width: 2;
+  cursor: grab;
+}
+
+.obstacle:active {
+  cursor: grabbing;
+}
+
+.obstacle--selected {
+  stroke-width: 3;
+}
+
+.handle {
+  fill: #fff;
+  stroke: var(--accent);
+  stroke-width: 2;
+  cursor: crosshair;
+}
+
+.handle:hover {
+  fill: var(--accent);
+  r: 8;
+}
+
+.draft__line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+}
+
+.draft__dot {
+  fill: var(--accent);
+}
+
+.hover-cell {
+  fill: rgb(76 141 255 / 0.18);
+  pointer-events: none;
+}
+
+/* --- route --- */
+
+:root {
+  --route: #35d6a4;
+  --goal: #ffb454;
+}
+
+.route {
+  pointer-events: none; /* never in the way of selecting or dragging a shape */
+}
+
+.route__cell {
+  fill: rgb(53 214 164 / 0.22);
+}
+
+.route__line {
+  fill: none;
+  stroke: var(--route);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.endpoint-marker {
+  pointer-events: none;
+}
+
+.endpoint-marker circle {
+  stroke: #0f1117;
+  stroke-width: 2;
+}
+
+.endpoint-marker text {
+  text-anchor: middle;
+  font-size: 11px;
+  font-weight: 700;
+  fill: #0f1117;
+}
+
+.endpoint-marker--src circle {
+  fill: var(--route);
+}
+
+.endpoint-marker--dest circle {
+  fill: var(--goal);
+}
+
+.endpoint {
+  align-items: center;
+  gap: 8px;
+}
+
+.endpoint__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.endpoint__dot--src {
+  background: var(--route);
+}
+
+.endpoint__dot--dest {
+  background: var(--goal);
+}
+
+.endpoint__name {
+  width: 40px;
+}
+
+.endpoint__cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.endpoint button {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.endpoint button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- obstacle list --- */
+
+.obstacle-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.obstacle-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.obstacle-list li:hover {
+  background: #202534;
+}
+
+.obstacle-list li.selected {
+  background: #232b40;
+  outline: 1px solid var(--accent);
+}
+
+.obstacle-list__id {
+  font-variant-numeric: tabular-nums;
+}
+
+.obstacle-list button {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+/* Saved routes reuse the obstacle list's rows — same job, same shape. */
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.plan-list li.selected {
+  background: #232b40;
+  outline: 1px solid var(--accent);
+}
+
+.plan-list__pick {
+  flex: 1;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-list .danger {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.panel__subhead {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+}
