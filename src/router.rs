@@ -18,15 +18,24 @@ pub async fn route(db: DatabaseConnection) -> Router {
     let state = AppState { db };
 
     Router::new()
-        .route("/", routing::get(|| async { "Hello, Yukon Motion Planner!" }))
+        .route(
+            "/",
+            routing::get(|| async { "Hello, Yukon Motion Planner!" }),
+        )
         .route("/grids", routing::get(list_grids).post(create_grid))
-        .route("/grids/{id}", routing::get(show_grid).put(update_grid).delete(delete_grid))
+        .route(
+            "/grids/{id}",
+            routing::get(show_grid).put(update_grid).delete(delete_grid),
+        )
         // Editing a grid that plans depend on forks a new snapshot rather than
         // rewriting the one those plans were computed against.
         .route("/grids/{id}/versions", routing::post(create_grid_version))
         // Plans are created against a grid but addressed on their own — a plan id is
         // not a grid id, and the nested delete used to conflate the two.
-        .route("/grids/{id}/plans", routing::get(list_grid_plans).post(generate_grid_plan))
+        .route(
+            "/grids/{id}/plans",
+            routing::get(list_grid_plans).post(generate_grid_plan),
+        )
         .route("/plans/{plan_id}", routing::delete(delete_plan))
         .with_state(state)
 }

@@ -2,7 +2,7 @@ use crate::entities::plans;
 use crate::handlers::helpers::{AppError, find_grid};
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
-use crate::models::planners::PlanError;
+use crate::models::planners::{PlanError, PlannerKind};
 use crate::router::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -59,11 +59,17 @@ pub(crate) async fn generate_grid_plan(
     // Fill obstacle cells by filling in obstacle polygons.
     grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
 
-    let optimal_path = match grid_world.find_optimal_plan(payload.src_vertex, payload.dest_vertex) {
-        Ok(path) => path,
-        Err(PlanError::Unreachable) => Vec::new(),
-        Err(err) => return Err(AppError::Invalid(err.to_string())),
-    };
+    // One value picks both the search and the name recorded below. Once `PlanInput` carries a
+    // planner this is the field, and nothing else in here changes.
+    let kind = PlannerKind::AStar;
+    let mut planner = kind.planner();
+
+    let optimal_path =
+        match grid_world.find_plan(payload.src_vertex, payload.dest_vertex, planner.as_mut()) {
+            Ok(path) => path,
+            Err(PlanError::Unreachable) => Vec::new(),
+            Err(err) => return Err(AppError::Invalid(err.to_string())),
+        };
     let vertices = optimal_path
         .iter()
         .map(|cell| grid_world.xy(*cell))
@@ -73,7 +79,7 @@ pub(crate) async fn generate_grid_plan(
     // This includes the planner used, source and destination vertices, whether the destination is reachable,
     // and the cost of the path.
     let meta = serde_json::json!({
-        "planner": "a_star",
+        "planner": kind.name(),
         "src_vertex": payload.src_vertex,
         "dest_vertex": payload.dest_vertex,
         "reachable": !vertices.is_empty(),

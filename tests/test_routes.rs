@@ -54,7 +54,10 @@ fn database_urls() -> Result<(String, String), String> {
     // connection, not to the database, so it survives the swap.
     let params = &path[name.len()..];
 
-    Ok((base.clone(), format!("{scheme}://{authority}/{TEST_DB}{params}")))
+    Ok((
+        base.clone(),
+        format!("{scheme}://{authority}/{TEST_DB}{params}"),
+    ))
 }
 
 /// A pool for the test database, sized so the parallel tests together stay well under
@@ -280,14 +283,14 @@ async fn create_grid_returns_201_and_echoes_the_grid() {
 async fn create_grid_saves_the_obstacles_it_was_given() {
     let client = Client::new();
     let base = spawn_app().await;
-    let polygons = json!([
-        [[0, 0], [3, 0], [3, 2]],
-        [[5, 5], [6, 5], [6, 6], [5, 6]],
-    ]);
+    let polygons = json!([[[0, 0], [3, 0], [3, 2]], [[5, 5], [6, 5], [6, 6], [5, 6]],]);
 
     let created = create_grid(&client, &base, 10, 10, polygons.clone()).await;
 
-    assert_eq!(created["obs_polygons"], polygons, "the response echoes them");
+    assert_eq!(
+        created["obs_polygons"], polygons,
+        "the response echoes them"
+    );
     // And they are stored, not just echoed.
     let stored = show_grid(&client, &base, created["id"].as_i64().unwrap()).await;
     assert_eq!(stored["obs_polygons"], polygons);
@@ -304,7 +307,7 @@ async fn an_obstacle_may_use_the_highest_valid_cell_index() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [9, 0], [9, 9]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 201);
 }
@@ -330,8 +333,7 @@ async fn list_grids_includes_a_newly_created_grid() {
 async fn the_listing_leaves_obstacles_out() {
     let client = Client::new();
     let base = spawn_app().await;
-    let created =
-        create_grid(&client, &base, 10, 10, json!([[[0, 0], [3, 0], [3, 2]]])).await;
+    let created = create_grid(&client, &base, 10, 10, json!([[[0, 0], [3, 0], [3, 2]]])).await;
     let grid_id = created["id"].as_i64().unwrap();
 
     let listed = list_grids(&client, &base).await;
@@ -390,7 +392,7 @@ async fn an_obstacle_needs_at_least_three_vertices() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [1, 1]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 400);
     assert!(res.text().await.unwrap().contains("at least 3 vertices"));
@@ -407,7 +409,7 @@ async fn vertices_past_the_grid_bounds_are_rejected() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 400);
     assert!(
@@ -428,7 +430,7 @@ async fn negative_vertices_are_rejected() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [-1, 0], [0, 5]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 400);
     assert!(
@@ -455,7 +457,7 @@ async fn a_bad_obstacle_is_named_by_its_position_in_the_list() {
             json!([[[0, 0], [3, 0], [3, 2]], [[0, 0], [1, 1]]]),
         ),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 400);
     assert!(res.text().await.unwrap().contains("obstacle 1"));
@@ -472,7 +474,7 @@ async fn a_rejected_obstacle_saves_no_grid_at_all() {
         &base,
         grid_body(&name, 10, 10, json!([[[0, 0], [1, 1]]])),
     )
-        .await;
+    .await;
     assert_eq!(res.status(), 400);
 
     // Obstacles ride along with the grid, so a bad one has to take the whole insert
@@ -495,7 +497,7 @@ async fn a_malformed_vertex_pair_is_rejected_before_the_handler() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [3], [3, 2]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 422);
 }
@@ -512,7 +514,7 @@ async fn obs_polygons_is_a_required_field() {
         &base,
         json!({ "name": unique_name(), "width": 10, "height": 10 }),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 422);
 }
@@ -534,11 +536,14 @@ async fn update_grid_replaces_every_field() {
         grid_id,
         grid_body(&renamed, 20, 30, replacement.clone()),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 200);
     let body: Value = res.json().await.unwrap();
-    assert_eq!(body["id"], grid_id, "an unfrozen edit stays on the same row");
+    assert_eq!(
+        body["id"], grid_id,
+        "an unfrozen edit stays on the same row"
+    );
     assert_eq!(body["version"], 0, "and does not spend a version");
     assert_eq!(body["name"], renamed.as_str());
     assert_eq!(body["width"], 20);
@@ -564,7 +569,10 @@ async fn update_grid_can_clear_the_obstacles() {
     let res = put_grid(&client, &base, grid_id, edited(&grid, 10, 10, json!([]))).await;
 
     assert_eq!(res.status(), 200);
-    assert_eq!(show_grid(&client, &base, grid_id).await["obs_polygons"], json!([]));
+    assert_eq!(
+        show_grid(&client, &base, grid_id).await["obs_polygons"],
+        json!([])
+    );
 }
 
 #[tokio::test]
@@ -603,7 +611,12 @@ async fn a_grid_cannot_shrink_below_its_obstacles() {
     let res = put_grid(&client, &base, grid_id, edited(&grid, 5, 5, obstacles)).await;
 
     assert_eq!(res.status(), 400);
-    assert!(res.text().await.unwrap().contains("obstacle 0 has vertex [8, 8]"));
+    assert!(
+        res.text()
+            .await
+            .unwrap()
+            .contains("obstacle 0 has vertex [8, 8]")
+    );
 
     // The grid is untouched, not partially applied.
     let stored = show_grid(&client, &base, grid_id).await;
@@ -625,7 +638,7 @@ async fn a_grid_may_shrink_once_the_obstacles_go_with_it() {
         grid_id,
         edited(&grid, 5, 5, json!([[[1, 1], [3, 1], [3, 3]]])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 200);
 }
@@ -643,7 +656,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         grid_id,
         edited(&grid, 10, 10, json!([[[0, 0], [1, 1]]])),
     )
-        .await;
+    .await;
     assert_eq!(too_few.status(), 400);
 
     let out_of_bounds = put_grid(
@@ -652,7 +665,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         grid_id,
         edited(&grid, 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
     )
-        .await;
+    .await;
     assert_eq!(out_of_bounds.status(), 400);
 }
 
@@ -668,7 +681,13 @@ async fn a_grid_is_editable_until_something_is_planned_against_it() {
     // Free editing while nothing depends on the geometry — this is the drawing phase,
     // and it must not burn a version per tweak.
     for size in [11, 12, 13] {
-        let res = put_grid(&client, &base, grid_id, edited(&grid, size, size, json!([]))).await;
+        let res = put_grid(
+            &client,
+            &base,
+            grid_id,
+            edited(&grid, size, size, json!([])),
+        )
+        .await;
         assert_eq!(res.status(), 200);
     }
     assert_eq!(show_grid(&client, &base, grid_id).await["version"], 0);
@@ -699,7 +718,13 @@ async fn the_freeze_covers_dimensions_as_well_as_obstacles() {
     // Resizing invalidates a stored route as thoroughly as moving an obstacle does, so
     // it is refused even though the obstacles are untouched.
     let same_obstacles = grid["obs_polygons"].clone();
-    let res = put_grid(&client, &base, grid_id, edited(&grid, 40, 40, same_obstacles)).await;
+    let res = put_grid(
+        &client,
+        &base,
+        grid_id,
+        edited(&grid, 40, 40, same_obstacles),
+    )
+    .await;
     assert_eq!(res.status(), 409);
 }
 
@@ -719,7 +744,7 @@ async fn a_rename_is_also_blocked_once_plans_exist() {
         grid_id,
         grid_body(&unique_name(), 10, 10, json!([])),
     )
-        .await;
+    .await;
     assert_eq!(res.status(), 409);
 }
 
@@ -765,7 +790,7 @@ async fn a_new_version_is_a_new_row_leaving_the_original_intact() {
         grid_id,
         edited(&grid, 10, 10, replacement.clone()),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 201);
     let v1: Value = res.json().await.unwrap();
@@ -844,7 +869,7 @@ async fn a_new_version_enforces_the_same_obstacle_validation() {
         grid_id,
         edited(&grid, 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
     )
-        .await;
+    .await;
     assert_eq!(res.status(), 400);
 }
 
@@ -859,7 +884,7 @@ async fn versioning_an_unknown_grid_is_404() {
         999999,
         grid_body(&unique_name(), 10, 10, json!([])),
     )
-        .await;
+    .await;
 
     assert_eq!(res.status(), 404);
 }
@@ -1044,8 +1069,14 @@ async fn planning_routes_around_a_saved_obstacle() {
     let base = spawn_app().await;
 
     // A wall down column 4, open only along the bottom row.
-    let grid_id = create_grid(&client, &base, 9, 5, json!([[[4, 0], [4, 3], [4, 3], [4, 0]]]))
-        .await["id"]
+    let grid_id = create_grid(
+        &client,
+        &base,
+        9,
+        5,
+        json!([[[4, 0], [4, 3], [4, 3], [4, 0]]]),
+    )
+    .await["id"]
         .as_i64()
         .unwrap();
 
@@ -1089,7 +1120,7 @@ async fn a_new_version_plans_against_its_own_obstacles() {
         grid_id,
         edited(&grid, 9, 5, json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
     )
-        .await;
+    .await;
     assert_eq!(res.status(), 201);
     let v1_id = res.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
 
@@ -1123,8 +1154,14 @@ async fn an_unreachable_goal_is_a_saved_plan_with_no_cells() {
     let base = spawn_app().await;
 
     // A wall clean across the grid, sealing the two halves off from each other.
-    let grid_id = create_grid(&client, &base, 5, 3, json!([[[2, 0], [2, 2], [2, 2], [2, 0]]]))
-        .await["id"]
+    let grid_id = create_grid(
+        &client,
+        &base,
+        5,
+        3,
+        json!([[[2, 0], [2, 2], [2, 2], [2, 0]]]),
+    )
+    .await["id"]
         .as_i64()
         .unwrap();
 
@@ -1143,13 +1180,23 @@ async fn an_unreachable_goal_is_a_saved_plan_with_no_cells() {
 async fn planning_from_inside_an_obstacle_is_400() {
     let client = Client::new();
     let base = spawn_app().await;
-    let grid_id = create_grid(&client, &base, 10, 10, json!([[[2, 2], [5, 2], [5, 5], [2, 5]]]))
-        .await["id"]
+    let grid_id = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        json!([[[2, 2], [5, 2], [5, 5], [2, 5]]]),
+    )
+    .await["id"]
         .as_i64()
         .unwrap();
 
     let res = post_plan(&client, &base, grid_id, [3, 3], [9, 9]).await;
-    assert_eq!(res.status(), 400, "a start inside an obstacle is the caller's mistake");
+    assert_eq!(
+        res.status(),
+        400,
+        "a start inside an obstacle is the caller's mistake"
+    );
     assert!(res.text().await.unwrap().contains("start"));
 
     let res = post_plan(&client, &base, grid_id, [0, 0], [3, 3]).await;
@@ -1213,7 +1260,10 @@ async fn an_empty_plan_list_is_how_a_client_knows_a_grid_is_editable() {
         .as_i64()
         .unwrap();
 
-    assert_eq!(list_plans(&client, &base, grid_id).await, Vec::<Value>::new());
+    assert_eq!(
+        list_plans(&client, &base, grid_id).await,
+        Vec::<Value>::new()
+    );
 
     freeze_with_plan(&client, &base, grid_id).await;
     assert_eq!(list_plans(&client, &base, grid_id).await.len(), 1);

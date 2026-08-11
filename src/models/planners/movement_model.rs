@@ -1,15 +1,13 @@
-//! What a step between two cells costs, and which steps exist at all.
+//! The movement model: what a [`GridWorldManager`] means once its cell type is [`Cell`].
 //!
-//! Split out from any one planner because this is a property of the *world*, not of the
-//! algorithm: A*, Dijkstra and anything added later have to agree on the movement model,
-//! or their plans aren't comparable and no planner can be checked against another.
-//!
-//! Everything here is an inherent impl on `GridWorld2<Cell>` — the fusion of the grid's
-//! geometry with the cell's contents, which is exactly the pairing a planner needs and
-//! neither module can supply alone.
+//! Which steps exist, what they cost, and how far the goal looks are settled here rather than
+//! inside any one planner, so every planner shares one answer instead of importing it from
+//! whichever happened to be written first. [`find_plan`](GridWorldManager::find_plan) is where
+//! a world and a [`Planner`] meet, and it owns the endpoint checks none of them should repeat.
 
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::{GridWorldManager, NodeId};
+use crate::models::planners::{PlanError, Planner};
 
 /// Step costs, scaled by 10 so a diagonal stays an integer.
 ///
@@ -39,7 +37,7 @@ impl GridWorldManager<Cell> {
     /// Forbidding steps never disturbs [`octile_heuristic`](Self::octile_heuristic_h):
     /// removing edges can only make the true cost higher, so a heuristic that already
     /// never overestimated still doesn't.
-    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item=NodeId> + '_ {
+    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let (x, y) = self.xy(id);
 
         self.neighbors8(id).filter(move |&next| {
@@ -78,7 +76,9 @@ impl GridWorldManager<Cell> {
     /// A one-cell path costs nothing — the start is never *entered*, so its terrain is
     /// never charged, matching [`step_cost`](Self::step_cost).
     pub fn path_cost(&self, path: &[NodeId]) -> u32 {
-        path.windows(2).map(|step| self.step_cost(step[0], step[1])).sum()
+        path.windows(2)
+            .map(|step| self.step_cost(step[0], step[1]))
+            .sum()
     }
 
     /// Octile distance — the exact cost of the cheapest *unobstructed* 8-connected path.
@@ -98,11 +98,46 @@ impl GridWorldManager<Cell> {
 
         ORTHOGONAL_COST * (dx + dy) - (2 * ORTHOGONAL_COST - DIAGONAL_COST) * dx.min(dy)
     }
+
+    /// Entry point from the handler: plans between two `[x, y]` cell coordinates using
+    /// `planner`.
+    ///
+    /// Every endpoint check lives here rather than in the planners. None of them is an
+    /// algorithm's concern — whether a coordinate is on the grid and whether a cell is
+    /// passable are facts about this world and this cell type — and hoisting them is what
+    /// makes the four endpoint variants of [`PlanError`] mean the same thing whichever
+    /// planner ran. A planner that had to remember them could quietly answer `Unreachable`
+    /// where its neighbor answered `SrcBlocked`.
+    ///
+    /// The corollary is that [`Planner::plan`] may assume both endpoints are legal.
+    pub(crate) fn find_plan(
+        &self,
+        src: [i32; 2],
+        dest: [i32; 2],
+        planner: &mut dyn Planner,
+    ) -> Result<Vec<NodeId>, PlanError> {
+        let src_id = self
+            .try_id(src[0] as isize, src[1] as isize)
+            .ok_or(PlanError::SrcOffGrid)?;
+        let dest_id = self
+            .try_id(dest[0] as isize, dest[1] as isize)
+            .ok_or(PlanError::DestOffGrid)?;
+
+        if !self.passable(src_id) {
+            return Err(PlanError::SrcBlocked);
+        }
+        if !self.passable(dest_id) {
+            return Err(PlanError::DestBlocked);
+        }
+
+        planner.plan(self, src_id, dest_id)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::planners::a_star::AStar;
     use crate::models::planners::world_from_ascii;
 
     fn empty_world(width: usize, height: usize) -> GridWorldManager<Cell> {
@@ -255,7 +290,16 @@ mod tests {
         let world = world_from_ascii(&["...", "...", "..."]);
         assert_eq!(
             neighbor_coords(&world, world.id(1, 1)),
-            vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1), (2, 2)],
+            vec![
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 2),
+                (2, 0),
+                (2, 1),
+                (2, 2)
+            ],
         );
     }
 
@@ -265,7 +309,9 @@ mod tests {
         // clips the corner where they meet.
         let world = world_from_ascii(&[".#.", "#..", "..."]);
         assert!(
-            !world.passable_neighbors(world.id(0, 0)).any(|n| n == world.id(1, 1)),
+            !world
+                .passable_neighbors(world.id(0, 0))
+                .any(|n| n == world.id(1, 1)),
             "the diagonal squeezed between two blocked cells",
         );
         // ...and with the corner sealed, (0,0) has no step at all.
@@ -308,6 +354,47 @@ mod tests {
                 world.xy(node),
             );
         }
+    }
+
+    // --- the endpoint checks ---------------------------------------------
+    //
+    // These belong to the entry point rather than to A*: each one rejects before the planner
+    // is called at all, so they hold for whichever planner is passed. A* is used below only
+    // because some planner has to be.
+
+    #[test]
+    fn an_off_grid_endpoint_is_reported_as_such() {
+        let world = world_from_ascii(&[".....", "..#..", "....."]);
+        let plan = |src, dest| world.find_plan(src, dest, &mut AStar);
+
+        assert_eq!(plan([0, 0], [5, 0]), Err(PlanError::DestOffGrid));
+        assert_eq!(plan([0, 0], [0, 3]), Err(PlanError::DestOffGrid));
+        assert_eq!(plan([-1, 0], [4, 2]), Err(PlanError::SrcOffGrid));
+        // Src is checked first: a request with both wrong names the start, and fixing
+        // that surfaces the goal next.
+        assert_eq!(plan([9, 9], [9, 9]), Err(PlanError::SrcOffGrid));
+    }
+
+    #[test]
+    fn a_blocked_endpoint_is_reported_as_such() {
+        let world = world_from_ascii(&[".....", "..#..", "....."]);
+        let plan = |src, dest| world.find_plan(src, dest, &mut AStar);
+
+        assert_eq!(plan([2, 1], [4, 2]), Err(PlanError::SrcBlocked));
+        assert_eq!(plan([0, 0], [2, 1]), Err(PlanError::DestBlocked));
+        // Both endpoints clear, so the same map does plan when asked something sane.
+        assert!(plan([0, 0], [4, 2]).is_ok());
+    }
+
+    #[test]
+    fn an_off_grid_endpoint_outranks_a_blocked_one() {
+        // Ordering worth pinning now that both checks live in one function: a coordinate
+        // that isn't on the grid has no cell to call blocked, so bounds must come first.
+        let world = world_from_ascii(&["..#", "...", "..."]);
+        assert_eq!(
+            world.find_plan([9, 9], [2, 0], &mut AStar),
+            Err(PlanError::SrcOffGrid),
+        );
     }
 
     #[test]

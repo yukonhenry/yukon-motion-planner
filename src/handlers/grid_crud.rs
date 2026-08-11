@@ -10,9 +10,7 @@ use crate::handlers::helpers::{AppError, ensure_unfrozen, find_grid};
 use crate::router::AppState;
 use axum::extract::Path;
 use axum::{Json, extract::State, http::StatusCode};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 
 // Request body for creating or replacing a grid. Note there's no `id` — on create
@@ -51,11 +49,7 @@ fn out_of_bounds(vertices: &[[i32; 2]], width: i32, height: i32) -> Option<[i32;
 // Obstacles arrive with the grid rather than through routes of their own, so this is
 // the only gate: a payload that fails here is rejected whole, leaving the stored grid
 // exactly as it was.
-fn validate_polygons(
-    polygons: &[Vec<[i32; 2]>],
-    width: i32,
-    height: i32,
-) -> Result<(), AppError> {
+fn validate_polygons(polygons: &[Vec<[i32; 2]>], width: i32, height: i32) -> Result<(), AppError> {
     for (index, vertices) in polygons.iter().enumerate() {
         if vertices.len() < 3 {
             return Err(AppError::Invalid(format!(
@@ -86,22 +80,18 @@ fn vertices_to_json(vertices: Vec<[i32; 2]>) -> serde_json::Value {
 }
 
 fn polygons_to_json(polygon: Vec<Vec<[i32; 2]>>) -> serde_json::Value {
-    serde_json::Value::Array(
-        polygon
-            .into_iter()
-            .map(vertices_to_json)
-            .collect(),
-    )
+    serde_json::Value::Array(polygon.into_iter().map(vertices_to_json).collect())
 }
 // --- grids ---------------------------------------------------------------
 
 // GET /grids — list all grids.
 pub(crate) async fn list_grids(
-    State(state): State<AppState>
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<GridOutput>>, AppError> {
     let grids = grid_worlds::Entity::find()
         .into_partial_model::<GridOutput>()
-        .all(&state.db).await?;
+        .all(&state.db)
+        .await?;
     Ok(Json(grids))
 }
 
@@ -177,7 +167,6 @@ pub(crate) async fn show_grid(
     Ok(Json(grid))
 }
 
-
 // PUT /grids/{id} — replace a grid's fields.
 pub(crate) async fn update_grid(
     State(state): State<AppState>,
@@ -225,11 +214,12 @@ pub(crate) async fn delete_grid(
     ensure_unfrozen(&state.db, id, "deleted", "delete its plans first").await?;
 
     // `rows_affected` doubles as the existence check, so this stays one round trip.
-    let res = grid_worlds::Entity::delete_by_id(id).exec(&state.db).await?;
+    let res = grid_worlds::Entity::delete_by_id(id)
+        .exec(&state.db)
+        .await?;
     if res.rows_affected == 0 {
         return Err(AppError::NotFound(format!("grid {id} not found")));
     }
 
     Ok(StatusCode::NO_CONTENT)
 }
-

@@ -56,7 +56,11 @@ pub struct GridWorldManager<T> {
 impl<T: Clone> GridWorldManager<T> {
     /// Builds a grid with every cell set to `cell`.
     pub fn filled(width: usize, height: usize, cell: T) -> Self {
-        Self { width, height, cells: vec![cell; width * height] }
+        Self {
+            width,
+            height,
+            cells: vec![cell; width * height],
+        }
     }
 }
 
@@ -80,7 +84,11 @@ impl<T> GridWorldManager<T> {
                 cells.push(f(x, y));
             }
         }
-        Self { width, height, cells }
+        Self {
+            width,
+            height,
+            cells,
+        }
     }
 
     /// Wraps existing row-major cells.
@@ -88,7 +96,11 @@ impl<T> GridWorldManager<T> {
     /// Returns `None` unless `cells.len() == width * height`, so a mismatch surfaces
     /// here rather than as scrambled rows later.
     pub fn from_vec(width: usize, height: usize, cells: Vec<T>) -> Option<Self> {
-        (cells.len() == width * height).then_some(Self { width, height, cells })
+        (cells.len() == width * height).then_some(Self {
+            width,
+            height,
+            cells,
+        })
     }
 
     pub fn width(&self) -> usize {
@@ -120,7 +132,12 @@ impl<T> GridWorldManager<T> {
     /// where the result can also go negative.
     #[inline]
     pub fn id(&self, x: usize, y: usize) -> NodeId {
-        assert!(self.contains(x, y), "({x}, {y}) is outside a {}x{} grid", self.width, self.height);
+        assert!(
+            self.contains(x, y),
+            "({x}, {y}) is outside a {}x{} grid",
+            self.width,
+            self.height
+        );
         NodeId(y * self.width + x)
     }
 
@@ -141,7 +158,11 @@ impl<T> GridWorldManager<T> {
     /// If `id` is not from a grid of this shape.
     #[inline]
     pub fn xy(&self, NodeId(i): NodeId) -> (usize, usize) {
-        assert!(i < self.cells.len(), "node {i} is outside a grid of {} cells", self.cells.len());
+        assert!(
+            i < self.cells.len(),
+            "node {i} is outside a grid of {} cells",
+            self.cells.len()
+        );
         (i % self.width, i / self.width)
     }
 
@@ -163,14 +184,17 @@ impl<T> GridWorldManager<T> {
     }
 
     /// Every cell paired with its id, in row-major order.
-    pub fn iter(&self) -> impl Iterator<Item=(NodeId, &T)> {
-        self.cells.iter().enumerate().map(|(i, cell)| (NodeId(i), cell))
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &T)> {
+        self.cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| (NodeId(i), cell))
     }
 
     /// The in-bounds orthogonal (4-connected) neighbors of `id`.
     /// The returned iterator borrows nothing, so the grid stays mutable while it is
     /// held — flood fills and rasterization both want that.
-    pub fn neighbors4(&self, id: NodeId) -> impl Iterator<Item=NodeId> + use < T > {
+    pub fn neighbors4(&self, id: NodeId) -> impl Iterator<Item = NodeId> + use<T> {
         self.neighbors(id, ORTHOGONAL)
     }
 
@@ -178,7 +202,7 @@ impl<T> GridWorldManager<T> {
     ///
     /// Diagonal steps cost √2 rather than 1; that's the caller's to apply, as is any
     /// rule about cutting corners between two blocked orthogonal cells.
-    pub fn neighbors8(&self, id: NodeId) -> impl Iterator<Item=NodeId> + use < T > {
+    pub fn neighbors8(&self, id: NodeId) -> impl Iterator<Item = NodeId> + use<T> {
         self.neighbors(id, ORTHOGONAL_AND_DIAGONAL)
     }
 
@@ -186,7 +210,7 @@ impl<T> GridWorldManager<T> {
         &self,
         id: NodeId,
         offsets: &'static [(i8, i8)],
-    ) -> impl Iterator<Item=NodeId> + use < T > {
+    ) -> impl Iterator<Item = NodeId> + use<T> {
         // Copied out so the iterator captures no borrow of `self`.
         let (x, y) = self.xy(id);
         let (width, height) = (self.width, self.height);
@@ -227,9 +251,11 @@ impl<T> GridWorldManager<T> {
     fn fill_polygon_interior<M: Fn(&mut T)>(&mut self, vertices: &[[i32; 2]], mark: &M) {
         // Bounding box limits the scanlines; clamping to the grid keeps a polygon
         // sitting far off-grid from iterating millions of empty rows.
-        let (min_y, max_y) = vertices.iter().fold((i32::MAX, i32::MIN), |(lo, hi), &[_, y]| {
-            (lo.min(y), hi.max(y))
-        });
+        let (min_y, max_y) = vertices
+            .iter()
+            .fold((i32::MAX, i32::MIN), |(lo, hi), &[_, y]| {
+                (lo.min(y), hi.max(y))
+            });
         let min_y = min_y.max(0);
         let max_y = max_y.min(self.height as i32 - 1);
 
@@ -237,7 +263,10 @@ impl<T> GridWorldManager<T> {
             let mut intersections = Vec::new();
             for i in 0..vertices.len() {
                 let (x1, y1) = (vertices[i][0], vertices[i][1]);
-                let (x2, y2) = (vertices[(i + 1) % vertices.len()][0], vertices[(i + 1) % vertices.len()][1]);
+                let (x2, y2) = (
+                    vertices[(i + 1) % vertices.len()][0],
+                    vertices[(i + 1) % vertices.len()][1],
+                );
 
                 if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
                     let x_intersect = x1 + (y - y1) * (x2 - x1) / (y2 - y1);
@@ -338,7 +367,10 @@ mod tests {
     #[test]
     fn from_fn_fills_in_row_major_order() {
         let grid = GridWorldManager::from_fn(3, 2, |x, y| (x, y));
-        assert_eq!(grid.cells(), &[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]);
+        assert_eq!(
+            grid.cells(),
+            &[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
+        );
     }
 
     #[test]
@@ -352,8 +384,16 @@ mod tests {
     fn try_id_rejects_out_of_bounds_and_negatives() {
         let grid = GridWorldManager::filled(4, 3, ());
         assert_eq!(grid.try_id(3, 2), Some(NodeId(11)));
-        assert_eq!(grid.try_id(4, 0), None, "x == width is one past the last column");
-        assert_eq!(grid.try_id(0, 3), None, "y == height is one past the last row");
+        assert_eq!(
+            grid.try_id(4, 0),
+            None,
+            "x == width is one past the last column"
+        );
+        assert_eq!(
+            grid.try_id(0, 3),
+            None,
+            "y == height is one past the last row"
+        );
         // Signed input is the point: as usize these would wrap to a huge in-range-looking value.
         assert_eq!(grid.try_id(-1, 0), None);
         assert_eq!(grid.try_id(0, -1), None);
@@ -379,7 +419,10 @@ mod tests {
     fn neighbors4_is_clipped_at_the_edges() {
         let grid = GridWorldManager::filled(3, 3, ());
         // Interior cell has all four.
-        assert_eq!(ids(grid.neighbors4(grid.id(1, 1)).collect()), vec![1, 3, 5, 7]);
+        assert_eq!(
+            ids(grid.neighbors4(grid.id(1, 1)).collect()),
+            vec![1, 3, 5, 7]
+        );
         // Corner has two.
         assert_eq!(ids(grid.neighbors4(grid.id(0, 0)).collect()), vec![1, 3]);
         // Edge has three.
@@ -389,7 +432,10 @@ mod tests {
     #[test]
     fn neighbors8_includes_diagonals() {
         let grid = GridWorldManager::filled(3, 3, ());
-        assert_eq!(ids(grid.neighbors8(grid.id(1, 1)).collect()), vec![0, 1, 2, 3, 5, 6, 7, 8]);
+        assert_eq!(
+            ids(grid.neighbors8(grid.id(1, 1)).collect()),
+            vec![0, 1, 2, 3, 5, 6, 7, 8]
+        );
         assert_eq!(ids(grid.neighbors8(grid.id(0, 0)).collect()), vec![1, 3, 4]);
     }
 
@@ -419,7 +465,10 @@ mod tests {
 
         let column = GridWorldManager::filled(1, 4, ());
         assert_eq!(ids(column.neighbors4(column.id(0, 0)).collect()), vec![1]);
-        assert_eq!(ids(column.neighbors4(column.id(0, 1)).collect()), vec![0, 2]);
+        assert_eq!(
+            ids(column.neighbors4(column.id(0, 1)).collect()),
+            vec![0, 2]
+        );
     }
 
     #[test]
@@ -444,7 +493,10 @@ mod tests {
 
         let mut grid: GridWorldManager<Cell> = GridWorldManager::new(3, 2);
         let id = grid.id(2, 1);
-        grid[id] = Cell { blocked: true, cost: 5 };
+        grid[id] = Cell {
+            blocked: true,
+            cost: 5,
+        };
         assert_eq!(grid[id].cost, 5);
         assert_eq!(grid.iter().filter(|(_, c)| c.blocked).count(), 1);
     }
@@ -500,7 +552,10 @@ mod tests {
         let n = vertices.len();
         for i in 0..n {
             let (xi, yi) = (vertices[i][0] as f64, vertices[i][1] as f64);
-            let (xj, yj) = (vertices[(i + 1) % n][0] as f64, vertices[(i + 1) % n][1] as f64);
+            let (xj, yj) = (
+                vertices[(i + 1) % n][0] as f64,
+                vertices[(i + 1) % n][1] as f64,
+            );
             let (px, py) = (px as f64, py as f64);
             if (yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
                 hit = !hit;
@@ -514,7 +569,9 @@ mod tests {
         let grid = rasterized(8, 6, &[[1, 1], [4, 1], [4, 4], [1, 4]]);
         assert_eq!(
             render(&grid),
-            ["........", ".####...", ".####...", ".####...", ".####...", "........"]
+            [
+                "........", ".####...", ".####...", ".####...", ".####...", "........"
+            ]
         );
     }
 
@@ -523,7 +580,9 @@ mod tests {
         let grid = rasterized(8, 7, &[[0, 0], [5, 0], [0, 5]]);
         assert_eq!(
             render(&grid),
-            ["######..", "#####...", "####....", "###.....", "##......", "#.......", "........"]
+            [
+                "######..", "#####...", "####....", "###.....", "##......", "#.......", "........"
+            ]
         );
     }
 
@@ -535,8 +594,8 @@ mod tests {
         assert_eq!(
             render(&grid),
             [
-                "#######.", "#######.", "#######.", "###.....", "###.....", "###.....",
-                "###.....", "........",
+                "#######.", "#######.", "#######.", "###.....", "###.....", "###.....", "###.....",
+                "........",
             ]
         );
     }
@@ -547,7 +606,9 @@ mod tests {
         let rows = render(&grid);
         assert_eq!(
             rows,
-            ["...#...", "..###..", ".#####.", "#######", ".#####.", "..###..", "...#..."]
+            [
+                "...#...", "..###..", ".#####.", "#######", ".#####.", "..###..", "...#..."
+            ]
         );
         // Mirror symmetry is a cheap check that the scanline spans aren't skewed.
         for row in &rows {
@@ -583,7 +644,14 @@ mod tests {
 
         // A single vertex, and none at all — both must be no-ops rather than
         // `% 0` panics in the edge-wrapping arithmetic.
-        assert_eq!(rasterized(4, 4, &[[2, 2]]).cells().iter().filter(|&&c| c != 0).count(), 1);
+        assert_eq!(
+            rasterized(4, 4, &[[2, 2]])
+                .cells()
+                .iter()
+                .filter(|&&c| c != 0)
+                .count(),
+            1
+        );
         assert!(rasterized(4, 4, &[]).cells().iter().all(|&c| c == 0));
     }
 
@@ -603,7 +671,10 @@ mod tests {
 
         grid.rasterize_polygon(&[[1, 1], [3, 1], [3, 3]], |cell| cell.blocked = true);
 
-        assert!(grid.iter().filter(|(_, c)| c.blocked).count() > 0, "nothing was marked");
+        assert!(
+            grid.iter().filter(|(_, c)| c.blocked).count() > 0,
+            "nothing was marked"
+        );
 
         // Marking in place must leave every other field intact — assigning a whole
         // cell would have wiped the terrain costs.

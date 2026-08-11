@@ -64,7 +64,7 @@ export interface PlanMeta {
     reachable: boolean;
     /**
      * Scaled by 10 so a diagonal stays an integer: an orthogonal step costs 10, a
-     * diagonal 14. See `ORTHOGONAL_COST` in src/models/planners/grid_cost.rs.
+     * diagonal 14. See `ORTHOGONAL_COST` in src/models/planners/movement_model.rs.
      */
     cost: number;
 }

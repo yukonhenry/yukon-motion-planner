@@ -29,7 +29,7 @@ impl MigrationTrait for Migration {
                             .from(Plans::Table, Plans::GridId)
                             .to(GridWorlds::Table, GridWorlds::Id)
                             .on_update(ForeignKeyAction::Cascade)
-                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )

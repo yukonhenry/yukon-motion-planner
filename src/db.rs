@@ -168,10 +168,7 @@ mod tests {
 
     #[test]
     fn reads_the_parts_of_a_full_url() {
-        assert_eq!(
-            host_port(URL),
-            Some(("db.example".to_string(), 6543))
-        );
+        assert_eq!(host_port(URL), Some(("db.example".to_string(), 6543)));
         assert_eq!(database_name(URL), Some("planner"));
     }
 
