@@ -36,7 +36,7 @@ impl GridWorldManager<Cell> {
     /// The permissive variant, which allows brushing a single corner, is this same test
     /// with `&&` relaxed to `||`.
     ///
-    /// Forbidding steps never disturbs [`octile_heuristic`](Self::octile_heuristic):
+    /// Forbidding steps never disturbs [`octile_heuristic`](Self::octile_heuristic_h):
     /// removing edges can only make the true cost higher, so a heuristic that already
     /// never overestimated still doesn't.
     pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item=NodeId> + '_ {
@@ -90,7 +90,7 @@ impl GridWorldManager<Cell> {
     /// make the real path dearer) and consistent (`h(a) <= step_cost(a, n) + h(n)` for
     /// every neighbor `n`). Consistency is what lets A* close a node on first
     /// expansion and never reopen it.
-    pub fn octile_heuristic(&self, from: NodeId, to: NodeId) -> u32 {
+    pub fn octile_heuristic_h(&self, from: NodeId, to: NodeId) -> u32 {
         let (x0, y0) = self.xy(from);
         let (x1, y1) = self.xy(to);
         let dx = x0.abs_diff(x1) as u32;
@@ -119,7 +119,7 @@ mod tests {
     fn octile_matches_hand_computed_distances() {
         let world = empty_world(10, 10);
         let h = |a: (usize, usize), b: (usize, usize)| {
-            world.octile_heuristic(world.id(a.0, a.1), world.id(b.0, b.1))
+            world.octile_heuristic_h(world.id(a.0, a.1), world.id(b.0, b.1))
         };
 
         assert_eq!(h((0, 0), (0, 0)), 0, "no distance to itself");
@@ -136,8 +136,8 @@ mod tests {
         for (a, _) in world.iter() {
             for (b, _) in world.iter() {
                 assert_eq!(
-                    world.octile_heuristic(a, b),
-                    world.octile_heuristic(b, a),
+                    world.octile_heuristic_h(a, b),
+                    world.octile_heuristic_h(b, a),
                     "asymmetric between {:?} and {:?}",
                     world.xy(a),
                     world.xy(b),
@@ -160,9 +160,9 @@ mod tests {
         let goal = world.id(7, 5);
 
         for (node, _) in world.iter() {
-            let h_node = world.octile_heuristic(node, goal);
+            let h_node = world.octile_heuristic_h(node, goal);
             for next in world.neighbors8(node) {
-                let bound = world.step_cost(node, next) + world.octile_heuristic(next, goal);
+                let bound = world.step_cost(node, next) + world.octile_heuristic_h(next, goal);
                 assert!(
                     h_node <= bound,
                     "inconsistent at {:?} -> {:?}: {h_node} > {bound}",
@@ -178,7 +178,7 @@ mod tests {
         let world = empty_world(6, 6);
         let goal = world.id(3, 4);
         for (node, _) in world.iter() {
-            let h = world.octile_heuristic(node, goal);
+            let h = world.octile_heuristic_h(node, goal);
             assert_eq!(
                 h == 0,
                 node == goal,

@@ -184,10 +184,31 @@ export default function App() {
         [picking, endpoints.dest],
     );
 
+    /**
+     * The start and goal on show: freshly picked cells, else the ones the displayed
+     * route was computed from.
+     *
+     * A plan carries its own endpoints — `meta.src_vertex` / `dest_vertex`, written by
+     * generate_grid_plan — so selecting a saved route can mark its S and G without the
+     * user re-picking them. Reading them from `meta` rather than from the route's first
+     * and last cell is what makes an *unreachable* plan legible too: it is saved with no
+     * cells at all, and the two markers with no line between them are the whole story.
+     *
+     * Both fall away with the route once the grid is dirty, since neither describes the
+     * obstacles now on the canvas.
+     */
+    const shown = useMemo(() => {
+        const planned = !dirty && plans.active ? plans.active.meta : null;
+        return {
+            src: endpoints.src ?? planned?.src_vertex ?? null,
+            dest: endpoints.dest ?? planned?.dest_vertex ?? null,
+        };
+    }, [endpoints, dirty, plans.active]);
+
     const generateRoute = useCallback(() => {
-        if (!endpoints.src || !endpoints.dest) return;
-        void plans.generate(endpoints.src, endpoints.dest);
-    }, [endpoints, plans]);
+        if (!shown.src || !shown.dest) return;
+        void plans.generate(shown.src, shown.dest);
+    }, [shown, plans]);
 
     const clearRoute = useCallback(() => {
         setEndpoints(NO_ENDPOINTS);
@@ -286,8 +307,8 @@ export default function App() {
 
                 {draft && (
                     <RoutePanel
-                        src={endpoints.src}
-                        dest={endpoints.dest}
+                        src={shown.src}
+                        dest={shown.dest}
                         picking={picking}
                         onPick={startPicking}
                         onGenerate={generateRoute}
@@ -358,8 +379,8 @@ export default function App() {
                         onUpdate={updateObstacle}
                         picking={picking}
                         onPickCell={placeEndpoint}
-                        src={endpoints.src}
-                        dest={endpoints.dest}
+                        src={shown.src}
+                        dest={shown.dest}
                         route={dirty ? null : (plans.active?.vertices ?? null)}
                         showFootprint={showFootprint}
                     />

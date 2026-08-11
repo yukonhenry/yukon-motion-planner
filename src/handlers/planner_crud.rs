@@ -44,10 +44,11 @@ pub(crate) async fn generate_grid_plan(
     let grid = find_grid(&state.db, id).await?;
     let mut grid_world = GridWorldManager::<Cell>::new(grid.width as usize, grid.height as usize);
 
-    // Decoding here rather than inside the grid keeps the model free of serde/axum
-    // types. A row we can't read is fatal: planning around obstacles we silently
-    // dropped would route straight through them.
-    let polygons = grid.obs_polygons
+    // Decode polygons from the stored JSON, which is an array of arrays of vertices, each vertex
+    // being a two-element array of x,y coordinates. The DB column is JSON, so the
+    // deserialization is a two-step process: first to a `serde_json::Value`, then to the typed structure.
+    let polygons = grid
+        .obs_polygons
         .as_array()
         .unwrap_or(&vec![])
         .iter()
@@ -55,25 +56,22 @@ pub(crate) async fn generate_grid_plan(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AppError::Invalid(format!("obstacle vertices are malformed: {e}")))?;
 
+    // Fill obstacle cells by filling in obstacle polygons.
     grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
 
-    // An unreachable goal is a fact about the world, not a bad request: the grid and
-    // both endpoints were fine, there is just no route, and an empty plan says so. A
-    // malformed endpoint is the caller's mistake and has to be a 400 — saving it as an
-    // empty plan would report a typo'd coordinate back as 201 Created.
     let optimal_path = match grid_world.find_optimal_plan(payload.src_vertex, payload.dest_vertex) {
         Ok(path) => path,
         Err(PlanError::Unreachable) => Vec::new(),
         Err(err) => return Err(AppError::Invalid(err.to_string())),
     };
-    let vertices = optimal_path.iter()
-        .map(|cell| grid_world.xy(*cell)).collect::<Vec<_>>();
+    let vertices = optimal_path
+        .iter()
+        .map(|cell| grid_world.xy(*cell))
+        .collect::<Vec<_>>();
 
-    // `meta` is NOT NULL, so it has to be set here rather than left to a column default
-    // that the migration does not define. What belongs in it is how the route was
-    // produced: a stored plan is only interpretable alongside the planner and the
-    // endpoints that produced it, and `vertices` alone cannot distinguish "no route
-    // exists" from a row written before the planner understood obstacles.
+    // Set meta information associated with the generated plan.
+    // This includes the planner used, source and destination vertices, whether the destination is reachable,
+    // and the cost of the path.
     let meta = serde_json::json!({
         "planner": "a_star",
         "src_vertex": payload.src_vertex,
@@ -85,9 +83,8 @@ pub(crate) async fn generate_grid_plan(
     let new_plan = plans::ActiveModel {
         grid_id: Set(id),
         name: Set(String::from("Prototype")),
-        vertices: Set(serde_json::to_value(vertices).map_err(|e| {
-            AppError::Invalid(format!("failed to serialize plan vertices: {e}"))
-        })?),
+        vertices: Set(serde_json::to_value(vertices)
+            .map_err(|e| AppError::Invalid(format!("failed to serialize plan vertices: {e}")))?),
         meta: Set(meta),
         ..Default::default() // leaves `id` unset so the DB generates it
     };

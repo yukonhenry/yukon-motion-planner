@@ -111,7 +111,7 @@ impl GridWorldManager<Cell> {
         search.cost_to_node[src_id.0] = 0;
 
         let mut nodes_to_expand = BinaryHeap::new();
-        let start_f = self.octile_heuristic(src_id, dest_id);
+        let start_f = self.octile_heuristic_h(src_id, dest_id);
         nodes_to_expand.push(Reverse((start_f, Reverse(0u32), src_id)));
 
         while let Some(Reverse((_f, _g, node))) = nodes_to_expand.pop() {
@@ -129,20 +129,20 @@ impl GridWorldManager<Cell> {
                 if search.closed[next.0] {
                     continue;
                 }
-                let tentative = search.cost_to_node[node.0] + self.step_cost(node, next);
+                let tentative_g = search.cost_to_node[node.0] + self.step_cost(node, next);
                 // `cost_to_node` starts at UNREACHED, so `<` doubles as the "first time
                 // seen" case — no separate `reached` flag needed.
-                if tentative < search.cost_to_node[next.0] {
-                    search.cost_to_node[next.0] = tentative;
+                if tentative_g < search.cost_to_node[next.0] {
+                    search.cost_to_node[next.0] = tentative_g;
                     search.parent[next.0] = Some(node);
-                    let f = tentative + self.octile_heuristic(next, dest_id);
+                    let f = tentative_g + self.octile_heuristic_h(next, dest_id);
                     // Ordered by `f`, then by *larger* `g` — equivalently smaller `h`,
                     // since `f = g + h`. Among nodes that look equally good, the one
                     // further along is likelier to reach the goal, and on open ground
                     // whole plateaus of equal `f` would otherwise be expanded breadth
                     // first. Tie order never affects optimality, only how much is
                     // touched getting there.
-                    nodes_to_expand.push(Reverse((f, Reverse(tentative), next)));
+                    nodes_to_expand.push(Reverse((f, Reverse(tentative_g), next)));
                     // Pushing a duplicate beats a decrease-key: the stale entry is
                     // dropped by the `closed` check when it surfaces.
                 }
