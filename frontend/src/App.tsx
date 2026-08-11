@@ -39,6 +39,7 @@ export default function App() {
         unsaved,
         startNew,
         close,
+        revert,
         adoptSaved,
         addObstacle,
         updateObstacle,
@@ -146,12 +147,14 @@ export default function App() {
 
     const discard = useCallback(() => {
         if (gridId === null) {
+            // Never saved, so there is nothing to go back to — the canvas closes instead.
             close();
         } else {
-            // Re-selecting reloads the stored geometry, which is the definition of reverting.
-            selectGrid(gridId);
+            revert();
+            // The cells picked so far were picked against the edits just thrown away.
+            resetInteraction();
         }
-    }, [gridId, close, selectGrid]);
+    }, [gridId, close, revert, resetInteraction]);
 
     // --- obstacles ---------------------------------------------------------
 

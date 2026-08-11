@@ -32,8 +32,14 @@ export const draftToInput = (draft: Draft): GridInput => ({
 
 export function useGridDraft(gridId: number | null) {
   const [draft, setDraft] = useState<Draft | null>(null);
-  /** Signature of the last saved state; `null` while the grid has never been saved. */
-  const [baseline, setBaseline] = useState<string | null>(null);
+  /**
+   * The last saved state, kept whole rather than as a signature so that reverting is a
+   * restore rather than a re-fetch. `null` while the grid has never been saved.
+   *
+   * Safe to share structure with `draft`: every edit below rebuilds the objects it touches,
+   * so nothing here is ever mutated out from under us.
+   */
+  const [baseline, setBaseline] = useState<Draft | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,11 +60,23 @@ export function useGridDraft(gridId: number | null) {
         obstacles: adopt(grid.obs_polygons),
       };
       setDraft(next);
-      setBaseline(signature(next));
+      setBaseline(next);
       setError(null);
     },
     [adopt],
   );
+
+  /**
+   * Throws away local edits, putting the canvas back to the last saved state.
+   *
+   * A no-op on a grid that was never saved — there is no state to go back to, and
+   * discarding it is `close`'s job.
+   */
+  const revert = useCallback(() => {
+    if (baseline === null) return;
+    setDraft(baseline);
+    setError(null);
+  }, [baseline]);
 
   // Selecting a grid loads its geometry; `GET /grids` deliberately omits it.
   useEffect(() => {
@@ -141,7 +159,8 @@ export function useGridDraft(gridId: number | null) {
    * "dirty" drives both the confirm button and the refusal to plan. A grid that has
    * never been saved is always dirty — there is nothing to compare it against.
    */
-  const dirty = draft !== null && (baseline === null || signature(draft) !== baseline);
+  const dirty =
+    draft !== null && (baseline === null || signature(draft) !== signature(baseline));
   const unsaved = draft !== null && baseline === null;
 
   return {
@@ -153,6 +172,7 @@ export function useGridDraft(gridId: number | null) {
     setError,
     startNew,
     close,
+    revert,
     adoptSaved,
     addObstacle,
     updateObstacle,
