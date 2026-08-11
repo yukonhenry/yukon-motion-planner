@@ -1,9 +1,6 @@
-//! The movement model: what a [`GridWorldManager`] means once its cell type is [`Cell`].
+//! The movement model: Definition of [`GridWorldManager`] actions and definitions when grid is defined with [`Cell`] structs.
 //!
-//! Which steps exist, what they cost, and how far the goal looks are settled here rather than
-//! inside any one planner, so every planner shares one answer instead of importing it from
-//! whichever happened to be written first. [`find_plan`](GridWorldManager::find_plan) is where
-//! a world and a [`Planner`] meet, and it owns the endpoint checks none of them should repeat.
+//! ['Cell'](crate::models::cell::Cell) primitive costs and planner-independent rules are defined.
 
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::{GridWorldManager, NodeId};
@@ -37,7 +34,7 @@ impl GridWorldManager<Cell> {
     /// Forbidding steps never disturbs [`octile_heuristic`](Self::octile_heuristic_h):
     /// removing edges can only make the true cost higher, so a heuristic that already
     /// never overestimated still doesn't.
-    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item=NodeId> + '_ {
         let (x, y) = self.xy(id);
 
         self.neighbors8(id).filter(move |&next| {
@@ -101,15 +98,8 @@ impl GridWorldManager<Cell> {
 
     /// Entry point from the handler: plans between two `[x, y]` cell coordinates using
     /// `planner`.
-    ///
-    /// Every endpoint check lives here rather than in the planners. None of them is an
-    /// algorithm's concern — whether a coordinate is on the grid and whether a cell is
-    /// passable are facts about this world and this cell type — and hoisting them is what
-    /// makes the four endpoint variants of [`PlanError`] mean the same thing whichever
-    /// planner ran. A planner that had to remember them could quietly answer `Unreachable`
-    /// where its neighbor answered `SrcBlocked`.
-    ///
-    /// The corollary is that [`Planner::plan`] may assume both endpoints are legal.
+    /// Specific error conditions are reported as `PlanError` so the handler can return a 400 with a
+    /// message that explains what went wrong.
     pub(crate) fn find_plan(
         &self,
         src: [i32; 2],
@@ -138,11 +128,7 @@ impl GridWorldManager<Cell> {
 mod tests {
     use super::*;
     use crate::models::planners::a_star::AStar;
-    use crate::models::planners::world_from_ascii;
-
-    fn empty_world(width: usize, height: usize) -> GridWorldManager<Cell> {
-        GridWorldManager::new(width, height)
-    }
+    use crate::models::planners::test_support::*;
 
     fn neighbor_coords(world: &GridWorldManager<Cell>, id: NodeId) -> Vec<(usize, usize)> {
         let mut coords: Vec<_> = world.passable_neighbors(id).map(|n| world.xy(n)).collect();

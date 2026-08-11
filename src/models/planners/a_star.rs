@@ -137,11 +137,7 @@ impl Planner for AStar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::planners::world_from_ascii;
-
-    fn empty_world(width: usize, height: usize) -> GridWorldManager<Cell> {
-        GridWorldManager::new(width, height)
-    }
+    use crate::models::planners::test_support::*;
 
     /// A* reached the way the handler reaches it. Naming the planner once here keeps the
     /// assertions below about the route rather than about the dispatch.
@@ -236,72 +232,6 @@ mod tests {
     }
 
     // --- searching around obstacles --------------------------------------
-
-    fn coords(world: &GridWorldManager<Cell>, path: &[NodeId]) -> Vec<(usize, usize)> {
-        path.iter().map(|&node| world.xy(node)).collect()
-    }
-
-    /// The properties a plan must have whichever route it picked: it runs from src to
-    /// dest, never stands on a blocked cell, and only ever moves between legal steps.
-    ///
-    /// Asserted separately from cost because a path can be the right *price* and still
-    /// be nonsense — a broken parent chain yields a cheap sequence that teleports.
-    fn assert_walkable(world: &GridWorldManager<Cell>, path: &[NodeId], src: NodeId, dest: NodeId) {
-        assert_eq!(path.first(), Some(&src), "plan does not start at src");
-        assert_eq!(path.last(), Some(&dest), "plan does not end at dest");
-
-        for &node in path {
-            assert!(
-                world.passable(node),
-                "plan crosses the blocked cell {:?}",
-                world.xy(node),
-            );
-        }
-        for step in path.windows(2) {
-            let (from, to) = (step[0], step[1]);
-            assert!(
-                world.passable_neighbors(from).any(|n| n == to),
-                "{:?} -> {:?} is not a legal step",
-                world.xy(from),
-                world.xy(to),
-            );
-        }
-    }
-
-    /// Uniform-cost search over the same edges — A* with `h == 0`, which is optimal on
-    /// any graph without depending on the heuristic at all.
-    ///
-    /// That is the point: it shares the movement model with the code under test, so it does
-    /// not check `movement_model`, but it does pin the two things a heuristic can break.
-    /// An overestimating `h` shows up as a *dearer* path, not a visibly wrong one, and
-    /// no hand-written expected route would catch it.
-    fn dijkstra_cost(world: &GridWorldManager<Cell>, src: NodeId, dest: NodeId) -> Option<u32> {
-        if !world.passable(src) || !world.passable(dest) {
-            return None;
-        }
-
-        let mut best = vec![u32::MAX; world.len()];
-        best[src.0] = 0;
-        let mut frontier = BinaryHeap::new();
-        frontier.push(Reverse((0u32, src)));
-
-        while let Some(Reverse((cost, node))) = frontier.pop() {
-            if node == dest {
-                return Some(cost);
-            }
-            if cost > best[node.0] {
-                continue;
-            }
-            for next in world.passable_neighbors(node) {
-                let tentative = cost + world.step_cost(node, next);
-                if tentative < best[next.0] {
-                    best[next.0] = tentative;
-                    frontier.push(Reverse((tentative, next)));
-                }
-            }
-        }
-        None
-    }
 
     #[test]
     fn plan_routes_around_a_wall_through_its_gap() {
@@ -412,14 +342,7 @@ mod tests {
         // a plan exists exactly when one exists, and it costs exactly the optimum.
         const N: usize = 10;
 
-        // Same xorshift as the rasterization sweep, to stay deterministic without rand.
-        let mut seed: u64 = 0x2026_0804;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
+        let mut next = xorshift(0x2026_0804);
 
         for trial in 0..400 {
             let mut world: GridWorldManager<Cell> = GridWorldManager::new(N, N);

@@ -1,7 +1,7 @@
 //! Path planners, and the movement model they share.
 
 pub(crate) mod a_star;
-pub(crate) mod d_lite;
+pub(crate) mod d_star_lite;
 pub(crate) mod movement_model;
 
 use crate::models::cell::Cell;
@@ -64,13 +64,19 @@ pub(crate) trait Planner {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlannerKind {
     AStar,
+    /// `allow(dead_code)` only because nothing *selects* a planner yet — the handler hardcodes
+    /// `AStar`. Giving `PlanInput` a `planner` field is what retires this attribute.
+    #[allow(dead_code)]
+    DStarLite,
 }
 
 impl PlannerKind {
-    /// The name recorded in a plan's `meta`.
+    /// The name recorded in a plan's `meta`. Spelled after the module, so a name in a stored
+    /// plan leads straight to the code that produced it.
     pub(crate) fn name(self) -> &'static str {
         match self {
             PlannerKind::AStar => "a_star",
+            PlannerKind::DStarLite => "d_star_lite",
         }
     }
 
@@ -81,36 +87,173 @@ impl PlannerKind {
     pub(crate) fn planner(self) -> Box<dyn Planner + Send> {
         match self {
             PlannerKind::AStar => Box::new(a_star::AStar),
+            PlannerKind::DStarLite => Box::new(d_star_lite::DStarLite),
         }
     }
 }
 
-/// Builds a world from an ASCII map: `#` blocked, `.` plain ground, a digit that cell's
-/// terrain cost.
-///
-/// Lives here rather than in one planner's test module because the map *is* the test
-/// input for anything that searches — the shape belongs in the test body as a picture,
-/// not as a run of `world[id].blocked = true` lines.
 #[cfg(test)]
-pub(crate) fn world_from_ascii(
-    rows: &[&str],
-) -> crate::models::grid_world_manager::GridWorldManager<crate::models::cell::Cell> {
+mod tests {
+    use super::*;
+
+    /// Every variant dispatches to something that plans, under a name no other variant shares.
+    ///
+    /// The name is what a stored plan carries, so a collision would make two planners
+    /// indistinguishable after the fact — and a variant wired to the wrong arm of `planner()`
+    /// would record one planner's name against another's route.
+    #[test]
+    fn every_planner_kind_dispatches_under_a_distinct_name() {
+        let kinds = [PlannerKind::AStar, PlannerKind::DStarLite];
+
+        let mut names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "two planners share a meta name");
+
+        let world = test_support::empty_world(4, 4);
+        for kind in kinds {
+            let mut planner = kind.planner();
+            let route = world.find_plan([0, 0], [3, 3], planner.as_mut());
+            assert_eq!(
+                route.map(|route| world.path_cost(&route)),
+                Ok(42),
+                "{} did not find the 3 diagonal steps across an open grid",
+                kind.name(),
+            );
+        }
+    }
+}
+
+/// Fixtures shared by the planner test modules.
+///
+/// These live here rather than in whichever planner was written first because none of them
+/// belongs to a planner: a map *is* the test input for anything that searches, and an
+/// independent optimal-cost oracle is what *every* planner has to be held against. Copying
+/// the oracle per planner would let two planners be consistently wrong together.
+#[cfg(test)]
+pub(crate) mod test_support {
     use crate::models::cell::Cell;
-    use crate::models::grid_world_manager::GridWorldManager;
+    use crate::models::grid_world_manager::{GridWorldManager, NodeId};
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
 
-    let width = rows[0].len();
-    assert!(rows.iter().all(|row| row.len() == width), "ragged map");
+    pub(crate) fn empty_world(width: usize, height: usize) -> GridWorldManager<Cell> {
+        GridWorldManager::new(width, height)
+    }
 
-    GridWorldManager::from_fn(width, rows.len(), |x, y| match rows[y].as_bytes()[x] {
-        b'#' => Cell {
-            blocked: true,
-            terrain_cost: 0,
-        },
-        b'.' => Cell::default(),
-        digit @ b'0'..=b'9' => Cell {
-            blocked: false,
-            terrain_cost: (digit - b'0') as u16,
-        },
-        other => panic!("unknown map character {:?}", other as char),
-    })
+    /// Builds a world from an ASCII map: `#` blocked, `.` plain ground, a digit that cell's
+    /// terrain cost.
+    ///
+    /// The shape belongs in the test body as a picture, not as a run of
+    /// `world[id].blocked = true` lines.
+    pub(crate) fn world_from_ascii(rows: &[&str]) -> GridWorldManager<Cell> {
+        let width = rows[0].len();
+        assert!(rows.iter().all(|row| row.len() == width), "ragged map");
+
+        GridWorldManager::from_fn(width, rows.len(), |x, y| match rows[y].as_bytes()[x] {
+            b'#' => Cell {
+                blocked: true,
+                terrain_cost: 0,
+            },
+            b'.' => Cell::default(),
+            digit @ b'0'..=b'9' => Cell {
+                blocked: false,
+                terrain_cost: (digit - b'0') as u16,
+            },
+            other => panic!("unknown map character {:?}", other as char),
+        })
+    }
+
+    pub(crate) fn coords(world: &GridWorldManager<Cell>, path: &[NodeId]) -> Vec<(usize, usize)> {
+        path.iter().map(|&node| world.xy(node)).collect()
+    }
+
+    /// The properties a plan must have whichever route it picked: it runs from src to
+    /// dest, never stands on a blocked cell, and only ever moves between legal steps.
+    ///
+    /// Asserted separately from cost because a path can be the right *price* and still
+    /// be nonsense — a broken parent chain yields a cheap sequence that teleports.
+    pub(crate) fn assert_walkable(
+        world: &GridWorldManager<Cell>,
+        path: &[NodeId],
+        src: NodeId,
+        dest: NodeId,
+    ) {
+        assert_eq!(path.first(), Some(&src), "plan does not start at src");
+        assert_eq!(path.last(), Some(&dest), "plan does not end at dest");
+
+        for &node in path {
+            assert!(
+                world.passable(node),
+                "plan crosses the blocked cell {:?}",
+                world.xy(node),
+            );
+        }
+        for step in path.windows(2) {
+            let (from, to) = (step[0], step[1]);
+            assert!(
+                world.passable_neighbors(from).any(|n| n == to),
+                "{:?} -> {:?} is not a legal step",
+                world.xy(from),
+                world.xy(to),
+            );
+        }
+    }
+
+    /// Uniform-cost search over the same edges — A* with `h == 0`, which is optimal on
+    /// any graph without depending on a heuristic at all.
+    ///
+    /// That is the point: it shares the movement model with the code under test, so it does
+    /// not check `movement_model`, but it does pin what a heuristic or an incremental update
+    /// rule can break. A planner that overestimates shows up as a *dearer* path, not a
+    /// visibly wrong one, and no hand-written expected route would catch it.
+    ///
+    /// Directional on purpose: [`step_cost`](GridWorldManager::step_cost) charges the terrain
+    /// of the cell being *entered*, so the cheapest route from `src` to `dest` need not cost
+    /// what the reverse does. A backwards search that reads an edge the wrong way round is
+    /// only caught by an oracle that keeps the directions straight.
+    pub(crate) fn dijkstra_cost(
+        world: &GridWorldManager<Cell>,
+        src: NodeId,
+        dest: NodeId,
+    ) -> Option<u32> {
+        if !world.passable(src) || !world.passable(dest) {
+            return None;
+        }
+
+        let mut best = vec![u32::MAX; world.len()];
+        best[src.0] = 0;
+        let mut frontier = BinaryHeap::new();
+        frontier.push(Reverse((0u32, src)));
+
+        while let Some(Reverse((cost, node))) = frontier.pop() {
+            if node == dest {
+                return Some(cost);
+            }
+            if cost > best[node.0] {
+                continue;
+            }
+            for next in world.passable_neighbors(node) {
+                let tentative = cost + world.step_cost(node, next);
+                if tentative < best[next.0] {
+                    best[next.0] = tentative;
+                    frontier.push(Reverse((tentative, next)));
+                }
+            }
+        }
+        None
+    }
+
+    /// Deterministic xorshift, so the sweeps below need no `rand` dependency and a failure
+    /// is reproducible from the seed alone.
+    pub(crate) fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
 }
