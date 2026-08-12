@@ -510,6 +510,129 @@ mod tests {
         }
     }
 
+    /// A world the size the sweeps below use, built from `next`.
+    ///
+    /// Opposite corners rather than random endpoints: the point of a large grid is a long search
+    /// that crosses the whole map, and a random pair is usually neighbours.
+    fn wide_open_maze(
+        n: usize,
+        next: &mut impl FnMut() -> u64,
+    ) -> (GridWorldManager<Cell>, NodeId, NodeId) {
+        let mut world: GridWorldManager<Cell> = GridWorldManager::new(n, n);
+        for id in 0..world.len() {
+            let cell = &mut world[NodeId(id)];
+            // Sparser than the 10x10 sweeps: at 30% blocked a 60x60 grid is almost always
+            // disconnected, and every trial would come back `Unreachable` having proved little.
+            cell.blocked = next() % 10 < 2;
+            cell.terrain_cost = (next() % 5) as u16;
+        }
+        let (src, dest) = (NodeId(0), NodeId(world.len() - 1));
+        world[src].blocked = false;
+        world[dest].blocked = false;
+        (world, src, dest)
+    }
+
+    #[test]
+    fn the_planners_agree_on_price_across_large_random_maps() {
+        // The same claim as `d_lite_and_a_star_agree_on_price_if_not_on_route`, at a scale where
+        // the two planners genuinely diverge. On a 9x6 map their frontiers overlap almost
+        // entirely; over 60x60 they explore substantially different regions — A* outward from the
+        // start, D* Lite backwards from the goal — so agreeing here is a much stronger statement
+        // than agreeing there.
+        //
+        // Costs only, again: the routes differ on most of these maps, and legitimately so.
+        let mut next = xorshift(0xBEEF);
+
+        for trial in 0..40 {
+            let (world, src, dest) = wide_open_maze(60, &mut next);
+
+            let by_a_star = AStar.plan(&world, src, dest);
+            let by_d_lite = DStarLite.plan(&world, src, dest);
+
+            match (by_a_star, by_d_lite) {
+                (Ok(a), Ok(d)) => {
+                    assert_walkable(&world, &d, src, dest);
+                    assert_eq!(
+                        world.path_cost(&a),
+                        world.path_cost(&d),
+                        "trial {trial}: A* priced {} and D* Lite {}",
+                        world.path_cost(&a),
+                        world.path_cost(&d),
+                    );
+                }
+                (Err(a), Err(d)) => assert_eq!(a, d, "trial {trial}"),
+                (a, d) => panic!("trial {trial}: A* said {a:?}, D* Lite said {d:?}"),
+            }
+        }
+    }
+
+    /// What the two planners cost when run from scratch, printed rather than asserted.
+    ///
+    /// `#[ignore]`d on purpose: a wall-clock assertion is a test that fails on a loaded machine
+    /// and tells you nothing about correctness. This exists to be *read* —
+    /// `cargo test --release -- --ignored --nocapture` — and the release profile matters, since a
+    /// debug build's bounds checking flatters neither planner evenly.
+    ///
+    /// What it is for: D* Lite run statelessly is a backwards A* carrying machinery it cannot yet
+    /// use. Expanding a node calls `update_vertex` on each of ~8 predecessors, and each of those
+    /// rescans its own ~8 neighbours to recompute `rhs` — so it pays roughly 64 neighbour
+    /// inspections per expansion where A* pays 8, and A* additionally stops the moment it pops the
+    /// goal. Measured at 60x60 that came out around 4x slower.
+    ///
+    /// That ratio is the number incremental replanning has to beat. One jittered corner
+    /// invalidates a handful of cells, so a repair that reuses its state should be far cheaper
+    /// than either figure here — and if it is not, the repair is touching too much.
+    #[test]
+    #[ignore = "a benchmark, not a check — run with --release --ignored --nocapture"]
+    fn bench_stateless_replanning_costs_more_than_a_star() {
+        use std::time::Instant;
+
+        let mut next = xorshift(0xBEEF);
+        let worlds: Vec<_> = (0..40).map(|_| wide_open_maze(60, &mut next)).collect();
+
+        // Planned first so neither timing pays for the allocation, and so a wrong answer is
+        // reported as wrong rather than as fast.
+        let a_costs: Vec<_> = worlds
+            .iter()
+            .map(|(w, s, d)| AStar.plan(w, *s, *d).map(|r| w.path_cost(&r)))
+            .collect();
+        let d_costs: Vec<_> = worlds
+            .iter()
+            .map(|(w, s, d)| DStarLite.plan(w, *s, *d).map(|r| w.path_cost(&r)))
+            .collect();
+        assert_eq!(
+            a_costs, d_costs,
+            "the planners disagreed — timings are moot"
+        );
+
+        let start = Instant::now();
+        for (world, src, dest) in &worlds {
+            let _ = AStar.plan(world, *src, *dest);
+        }
+        let a_star = start.elapsed();
+
+        let start = Instant::now();
+        for (world, src, dest) in &worlds {
+            let _ = DStarLite.plan(world, *src, *dest);
+        }
+        let d_star_lite = start.elapsed();
+
+        let differing = worlds
+            .iter()
+            .filter(|(w, s, d)| AStar.plan(w, *s, *d) != DStarLite.plan(w, *s, *d))
+            .count();
+
+        println!(
+            "\n{} maps at 60x60, from scratch:\n  \
+             a_star       {a_star:>12.2?}\n  \
+             d_star_lite  {d_star_lite:>12.2?}   ({:.2}x)\n  \
+             same cost every time, different route on {differing}/{}\n",
+            worlds.len(),
+            d_star_lite.as_secs_f64() / a_star.as_secs_f64(),
+            worlds.len(),
+        );
+    }
+
     // --- the machinery ---------------------------------------------------
 
     #[test]

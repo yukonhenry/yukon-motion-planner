@@ -1,16 +1,32 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
+import * as api from './api';
 import {GridCanvas} from './components/GridCanvas';
 import {GridPicker} from './components/GridPicker';
 import {ObstacleList} from './components/ObstacleList';
 import {RoutePanel} from './components/RoutePanel';
 import {SavePanel} from './components/SavePanel';
+import {SimPanel} from './components/SimPanel';
 import {MIN_VERTICES, validateObstacles, validateVertices} from './geometry';
-import {draftToInput, useGridDraft} from './hooks/useGridDraft';
+import {draftToInput, fromWire, toWire, useGridDraft} from './hooks/useGridDraft';
 import {useGrids} from './hooks/useGrids';
 import {usePlans} from './hooks/usePlans';
-import type {Endpoint, Vertex} from './types';
+import type {Endpoint, Obstacle, Vertex} from './types';
 
 const NO_ENDPOINTS: Record<Endpoint, Vertex | null> = {src: null, dest: null};
+
+/** One in-progress simulation run. Ephemeral — the server keeps nothing between ticks. */
+interface Sim {
+    /** Where the obstacles are now, which is also what the next tick sends. */
+    obstacles: Obstacle[];
+    /** Chained from the last response, so the run replays from its first seed. */
+    seed: number;
+    route: Vertex[];
+    reachable: boolean;
+    cost: number;
+    moved: number;
+    planner: string;
+    tick: number;
+}
 
 /**
  * The shape of the app follows one rule from the API: a grid row freezes as soon as a
@@ -31,6 +47,16 @@ export default function App() {
     const [saveError, setSaveError] = useState<string | null>(null);
     /** Off by default: it is a debugging view, and it hides the grid lines underneath. */
     const [showFootprint, setShowFootprint] = useState(false);
+    /**
+     * The moving-obstacle run, or `null` when none is in progress.
+     *
+     * Held apart from the draft on purpose. The perturbed geometry is *not* an edit the user
+     * made, so writing it into the draft would mark the grid dirty and offer to save tick 37's
+     * shapes as if they were the intent. Keeping it here means Reset is free and the saved grid
+     * is never at risk.
+     */
+    const [sim, setSim] = useState<Sim | null>(null);
+    const [stepping, setStepping] = useState(false);
 
     const plans = usePlans(gridId);
     const {
@@ -43,6 +69,7 @@ export default function App() {
         adoptSaved,
         addObstacle,
         updateObstacle,
+        setObstacleDynamic,
         removeObstacle,
         ...draftState
     } = useGridDraft(gridId);
@@ -219,6 +246,71 @@ export default function App() {
         plans.hide();
     }, [plans]);
 
+    // --- simulation --------------------------------------------------------
+
+    /**
+     * What the canvas is showing: the run's obstacles once one is going, else the working copy.
+     *
+     * The draft is what a *save* would write, so it stays the source of truth for the shapes the
+     * user drew; this is only what is on screen.
+     */
+    const shownObstacles = sim?.obstacles ?? draft?.obstacles ?? [];
+    const dynamicCount = shownObstacles.filter((o) => o.dynamic).length;
+
+    /**
+     * Why a tick cannot run, or `null`. Every reason is about the *server's* view: replan plans
+     * against the geometry it is sent, but the grid it needs for dimensions has to exist.
+     */
+    const stepBlocked =
+        savedGrid === null
+            ? 'Save the grid first — a run needs a stored grid to size itself against.'
+            : !shown.src || !shown.dest
+              ? 'Place a start and a goal first.'
+              : dirty && sim === null
+                ? 'Save or revert the pending edits first.'
+                : null;
+
+    const step = useCallback(async () => {
+        if (!savedGrid || !shown.src || !shown.dest) return;
+        setStepping(true);
+        setSaveError(null);
+        try {
+            const result = await api.replan(savedGrid.id, {
+                src_vertex: shown.src,
+                dest_vertex: shown.dest,
+                obs_polygons: (sim?.obstacles ?? draft?.obstacles ?? []).map(toWire),
+                // Absent on the first tick, so the server picks a starting seed; chained after.
+                seed: sim?.seed,
+            });
+            setSim((current) => ({
+                obstacles: result.obs_polygons.map(fromWire),
+                seed: result.next_seed,
+                route: result.vertices,
+                reachable: result.reachable,
+                cost: result.cost,
+                moved: result.moved,
+                planner: result.planner,
+                tick: (current?.tick ?? 0) + 1,
+            }));
+        } catch (e) {
+            setSaveError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setStepping(false);
+        }
+    }, [savedGrid, shown, sim, draft]);
+
+    /** Drops the run. The draft was never touched, so the canvas snaps back to the saved shapes. */
+    const resetSim = useCallback(() => {
+        setSim(null);
+        setSaveError(null);
+    }, []);
+
+    // A run describes one grid and one pair of endpoints; changing either leaves its obstacle
+    // positions and its route describing something that is no longer on screen.
+    useEffect(() => {
+        setSim(null);
+    }, [gridId]);
+
     // Esc cancels a drawing, Delete removes the selection — both only when not typing.
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -354,6 +446,20 @@ export default function App() {
                             removeObstacle(id);
                             if (id === selectedId) setSelectedId(null);
                         }}
+                        onSetDynamic={setObstacleDynamic}
+                        readOnly={frozen || sim !== null}
+                    />
+                )}
+
+                {draft && (
+                    <SimPanel
+                        tick={sim?.tick ?? 0}
+                        last={sim}
+                        dynamicCount={dynamicCount}
+                        blocked={stepBlocked}
+                        pending={stepping}
+                        onStep={() => void step()}
+                        onReset={resetSim}
                     />
                 )}
 
@@ -374,17 +480,20 @@ export default function App() {
                 {draft && (
                     <GridCanvas
                         grid={draft}
-                        obstacles={draft.obstacles}
+                        obstacles={shownObstacles}
                         selectedId={selectedId}
                         onSelect={setSelectedId}
                         draft={pencil}
                         onDraftAppend={(cell) => setPencil((d) => (d ? [...d, cell] : [cell]))}
-                        onUpdate={updateObstacle}
+                        // Dragging a shape during a run would edit the *draft* while the canvas
+                        // shows the run's geometry — two different sets of shapes, one of them
+                        // invisible. Reset first.
+                        onUpdate={sim ? () => {} : updateObstacle}
                         picking={picking}
                         onPickCell={placeEndpoint}
                         src={shown.src}
                         dest={shown.dest}
-                        route={dirty ? null : (plans.active?.vertices ?? null)}
+                        route={sim ? sim.route : dirty ? null : (plans.active?.vertices ?? null)}
                         showFootprint={showFootprint}
                     />
                 )}

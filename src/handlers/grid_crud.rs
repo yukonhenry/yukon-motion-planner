@@ -7,20 +7,21 @@
 
 use crate::entities::grid_worlds;
 use crate::handlers::helpers::{AppError, ensure_unfrozen, find_grid};
+use crate::models::obstacle::{CellVertex, ObstaclePoly};
 use crate::router::AppState;
 use axum::extract::Path;
 use axum::{Json, extract::State, http::StatusCode};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 
-// Request body for creating or replacing a grid. Note there's no `id` — on create
-// the DB assigns it, and on update it comes from the path.
+// Request body for creating or replacing a grid.
+// For Update, id comes from path.
 #[derive(Debug, Deserialize)]
 pub(crate) struct GridInput {
     name: String,
     width: i32,
     height: i32,
-    obs_polygons: Vec<Vec<[i32; 2]>>,
+    obs_polygons: Vec<ObstaclePoly>,
 }
 
 #[derive(Debug, Serialize, DerivePartialModel)]
@@ -37,30 +38,44 @@ pub(crate) struct GridOutput {
 
 // The first vertex outside a `width` x `height` grid, if there is one. Vertices are
 // cell indices, so the far edge is out of range: a 10-wide grid addresses columns 0..=9.
-fn out_of_bounds(vertices: &[[i32; 2]], width: i32, height: i32) -> Option<[i32; 2]> {
+fn out_of_bounds(vertices: &[CellVertex], width: i32, height: i32) -> Option<CellVertex> {
     vertices
         .iter()
         .copied()
-        .find(|[x, y]| !(0..width).contains(x) || !(0..height).contains(y))
+        .find(|v| !(0..width).contains(&v.x) || !(0..height).contains(&v.y))
 }
 
-// Every polygon needs three corners, and all of them have to sit on the grid.
+// Every polygon needs three corners, all of them on the grid, and an id no sibling shares.
 //
 // Obstacles arrive with the grid rather than through routes of their own, so this is
 // the only gate: a payload that fails here is rejected whole, leaving the stored grid
 // exactly as it was.
-fn validate_polygons(polygons: &[Vec<[i32; 2]>], width: i32, height: i32) -> Result<(), AppError> {
-    for (index, vertices) in polygons.iter().enumerate() {
-        if vertices.len() < 3 {
+pub(crate) fn validate_polygons(
+    polygons: &[ObstaclePoly],
+    width: i32,
+    height: i32,
+) -> Result<(), AppError> {
+    for (index, obstacle) in polygons.iter().enumerate() {
+        if obstacle.vertices.len() < 3 {
             return Err(AppError::Invalid(format!(
                 "obstacle {index} needs at least 3 vertices, got {}",
-                vertices.len()
+                obstacle.vertices.len()
             )));
         }
 
-        if let Some([x, y]) = out_of_bounds(vertices, width, height) {
+        if let Some(vertex) = out_of_bounds(&obstacle.vertices, width, height) {
             return Err(AppError::Invalid(format!(
-                "obstacle {index} has vertex [{x}, {y}] outside the {width}x{height} grid",
+                "obstacle {index} has vertex [{}, {}] outside the {width}x{height} grid",
+                vertex.x, vertex.y,
+            )));
+        }
+
+        // Detect a shared id by scanning the earlier obstacles for one with the same id. The
+        // earlier one is the one that "owns" the id, and the later one is the one that is trying to use it.
+        if let Some(earlier) = polygons[..index].iter().position(|o| o.id == obstacle.id) {
+            return Err(AppError::Invalid(format!(
+                "obstacles {earlier} and {index} share id {} — ids must be distinct",
+                obstacle.id,
             )));
         }
     }
@@ -68,19 +83,11 @@ fn validate_polygons(polygons: &[Vec<[i32; 2]>], width: i32, height: i32) -> Res
     Ok(())
 }
 
-// Building the `Value` by hand keeps this infallible — `serde_json::to_value`
-// returns a `Result` we'd only ever unwrap.
-fn vertices_to_json(vertices: Vec<[i32; 2]>) -> serde_json::Value {
-    serde_json::Value::Array(
-        vertices
-            .into_iter()
-            .map(|[x, y]| serde_json::Value::Array(vec![x.into(), y.into()]))
-            .collect(),
-    )
-}
-
-fn polygons_to_json(polygon: Vec<Vec<[i32; 2]>>) -> serde_json::Value {
-    serde_json::Value::Array(polygon.into_iter().map(vertices_to_json).collect())
+// `to_value` rather than a hand-built `Value`: for a struct of `i32`, `bool` and `Vec`,
+// serialization cannot fail — the error cases are non-string map keys and non-finite floats,
+// neither of which this type can produce.
+fn polygons_to_json(polygons: &[ObstaclePoly]) -> serde_json::Value {
+    serde_json::to_value(polygons).expect("obstacle geometry is always serializable")
 }
 // --- grids ---------------------------------------------------------------
 
@@ -124,7 +131,7 @@ pub(crate) async fn create_grid(
         name: Set(payload.name),
         width: Set(payload.width),
         height: Set(payload.height),
-        obs_polygons: Set(polygons_to_json(payload.obs_polygons)),
+        obs_polygons: Set(polygons_to_json(&payload.obs_polygons)),
         version: Set(0),
         ..Default::default() // leaves `id` unset so the DB generates it
     };
@@ -150,7 +157,7 @@ pub(crate) async fn create_grid_version(
         name: Set(payload.name),
         width: Set(payload.width),
         height: Set(payload.height),
-        obs_polygons: Set(polygons_to_json(payload.obs_polygons)),
+        obs_polygons: Set(polygons_to_json(&payload.obs_polygons)),
         version: Set(parent.version + 1),
         ..Default::default()
     };
@@ -184,7 +191,7 @@ pub(crate) async fn update_grid(
         "edited",
         &format!("POST /grids/{id}/versions to save a new version, or delete the plans first"),
     )
-    .await?;
+        .await?;
 
     // PUT replaces the whole grid, obstacles included — with the `/obstacles` routes
     // gone this is the only way to edit them. Validating against the *requested*
@@ -197,7 +204,7 @@ pub(crate) async fn update_grid(
     grid.name = Set(payload.name);
     grid.width = Set(payload.width);
     grid.height = Set(payload.height);
-    grid.obs_polygons = Set(polygons_to_json(payload.obs_polygons));
+    grid.obs_polygons = Set(polygons_to_json(&payload.obs_polygons));
 
     Ok(Json(grid.update(&state.db).await?))
 }

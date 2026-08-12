@@ -1,4 +1,12 @@
-import type { Grid, GridDetail, GridInput, Plan, Vertex } from './types';
+import type {
+  Grid,
+  GridDetail,
+  GridInput,
+  Plan,
+  ReplanInput,
+  ReplanResult,
+  Vertex,
+} from './types';
 
 /**
  * The API's error responses are plain text, and deliberately human-readable
@@ -92,3 +100,16 @@ export const generatePlan = (gridId: number, src: Vertex, dest: Vertex) =>
 /** Deleting the last plan of a grid unfreezes it for editing again. */
 export const deletePlan = (planId: number) =>
   request<void>(`/plans/${planId}`, { method: 'DELETE' });
+
+/**
+ * Advances a moving-obstacle simulation one tick and replans, with D* Lite.
+ *
+ * Stores nothing: no plan row, and the grid's own geometry is left as the initial condition. So
+ * unlike {@link generatePlan} this neither freezes the grid nor shows up in {@link listPlans} —
+ * the returned result is the only record of the tick, and the caller owns the run's state.
+ */
+export const replan = (gridId: number, input: ReplanInput) =>
+  request<ReplanResult>(`/grids/${gridId}/replan`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });

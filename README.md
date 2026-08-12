@@ -12,17 +12,17 @@ Backend built in Rust, using Axum/SeaORM/Postgres. Frontend built in React/TypeS
 
 ## Instructions
 
-* Install Rust and Node.js (with npm/pnpm) if you don't have them already.
+* Install Rust and Node.js (with pnpm) if you don't have them already.
 * Run `pnpm install` in the `frontend` directory to install frontend dependencies.
 * Run `cargo build` in the root directory to build the backend.
 * Run `docker compose up` in the root directory to start a Postgres database.'
 * Run `cargo run` in the root directory to start the backend server.
-* Run `npm (or pnpm) run dev` in the `frontend` directory to start the frontend server.
+* Run `pnpm run dev` in the `frontend` directory to start the frontend server.
 
 # In Progress
 
-* More planning algorithms (only A* now)
-* Moving obstacles
+* More planning algorithms (only A* and D*Lite for now)
+* Moving/Varying obstacles and Temporal planning
 * Actuator Dynamics
 * Uncertainty modeling
 * 3D planning

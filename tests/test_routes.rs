@@ -146,8 +146,37 @@ fn unique_name() -> String {
     format!("grid-{nanos}-{n}")
 }
 
+/// Wraps bare `[[x, y], …]` polygons in the envelope `obs_polygons` is actually stored in:
+/// each shape an object carrying `id` and `dynamic` beside its `{x, y}` vertex list.
+///
+/// The tests below draw shapes as coordinate lists because that reads as a picture, and the
+/// envelope is identical in nearly every one of them — so it is added here rather than
+/// spelled out two dozen times. Ids are positional, which is enough for anything that is not
+/// specifically about identity; a test that cares passes its own payload instead.
+fn polys(bare: Value) -> Value {
+    Value::Array(
+        bare.as_array()
+            .expect("a list of polygons")
+            .iter()
+            .enumerate()
+            .map(|(index, polygon)| {
+                let vertices: Vec<Value> = polygon
+                    .as_array()
+                    .expect("a list of vertices")
+                    .iter()
+                    .map(|vertex| {
+                        let pair = vertex.as_array().expect("an [x, y] pair");
+                        json!({ "x": pair[0], "y": pair[1] })
+                    })
+                    .collect();
+                json!({ "id": index as i32, "dynamic": false, "vertices": vertices })
+            })
+            .collect(),
+    )
+}
+
 /// The body both `POST /grids` and `PUT /grids/{id}` take — a whole grid, obstacles
-/// included. `obs_polygons` is a list of polygons, each a list of `[x, y]` cells.
+/// included. `obs_polygons` is a list of obstacle objects; see [`polys`].
 fn grid_body(name: &str, width: i32, height: i32, obs_polygons: Value) -> Value {
     json!({ "name": name, "width": width, "height": height, "obs_polygons": obs_polygons })
 }
@@ -283,7 +312,10 @@ async fn create_grid_returns_201_and_echoes_the_grid() {
 async fn create_grid_saves_the_obstacles_it_was_given() {
     let client = Client::new();
     let base = spawn_app().await;
-    let polygons = json!([[[0, 0], [3, 0], [3, 2]], [[5, 5], [6, 5], [6, 6], [5, 6]],]);
+    let polygons = polys(json!([
+        [[0, 0], [3, 0], [3, 2]],
+        [[5, 5], [6, 5], [6, 6], [5, 6]],
+    ]));
 
     let created = create_grid(&client, &base, 10, 10, polygons.clone()).await;
 
@@ -305,7 +337,12 @@ async fn an_obstacle_may_use_the_highest_valid_cell_index() {
     let res = post_grid(
         &client,
         &base,
-        grid_body(&unique_name(), 10, 10, json!([[[0, 0], [9, 0], [9, 9]]])),
+        grid_body(
+            &unique_name(),
+            10,
+            10,
+            polys(json!([[[0, 0], [9, 0], [9, 9]]])),
+        ),
     )
     .await;
 
@@ -333,7 +370,14 @@ async fn list_grids_includes_a_newly_created_grid() {
 async fn the_listing_leaves_obstacles_out() {
     let client = Client::new();
     let base = spawn_app().await;
-    let created = create_grid(&client, &base, 10, 10, json!([[[0, 0], [3, 0], [3, 2]]])).await;
+    let created = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[0, 0], [3, 0], [3, 2]]])),
+    )
+    .await;
     let grid_id = created["id"].as_i64().unwrap();
 
     let listed = list_grids(&client, &base).await;
@@ -352,7 +396,7 @@ async fn the_listing_leaves_obstacles_out() {
 async fn show_grid_returns_the_grid_and_its_obstacles() {
     let client = Client::new();
     let base = spawn_app().await;
-    let polygons = json!([[[1, 1], [4, 1], [4, 3]]]);
+    let polygons = polys(json!([[[1, 1], [4, 1], [4, 3]]]));
     let created = create_grid(&client, &base, 8, 8, polygons.clone()).await;
     let grid_id = created["id"].as_i64().unwrap();
 
@@ -390,7 +434,7 @@ async fn an_obstacle_needs_at_least_three_vertices() {
     let res = post_grid(
         &client,
         &base,
-        grid_body(&unique_name(), 10, 10, json!([[[0, 0], [1, 1]]])),
+        grid_body(&unique_name(), 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
     .await;
 
@@ -407,7 +451,12 @@ async fn vertices_past_the_grid_bounds_are_rejected() {
     let res = post_grid(
         &client,
         &base,
-        grid_body(&unique_name(), 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
+        grid_body(
+            &unique_name(),
+            10,
+            10,
+            polys(json!([[[0, 0], [10, 0], [0, 5]]])),
+        ),
     )
     .await;
 
@@ -428,7 +477,12 @@ async fn negative_vertices_are_rejected() {
     let res = post_grid(
         &client,
         &base,
-        grid_body(&unique_name(), 10, 10, json!([[[0, 0], [-1, 0], [0, 5]]])),
+        grid_body(
+            &unique_name(),
+            10,
+            10,
+            polys(json!([[[0, 0], [-1, 0], [0, 5]]])),
+        ),
     )
     .await;
 
@@ -454,7 +508,7 @@ async fn a_bad_obstacle_is_named_by_its_position_in_the_list() {
             &unique_name(),
             10,
             10,
-            json!([[[0, 0], [3, 0], [3, 2]], [[0, 0], [1, 1]]]),
+            polys(json!([[[0, 0], [3, 0], [3, 2]], [[0, 0], [1, 1]]])),
         ),
     )
     .await;
@@ -472,7 +526,7 @@ async fn a_rejected_obstacle_saves_no_grid_at_all() {
     let res = post_grid(
         &client,
         &base,
-        grid_body(&name, 10, 10, json!([[[0, 0], [1, 1]]])),
+        grid_body(&name, 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
     .await;
     assert_eq!(res.status(), 400);
@@ -491,7 +545,9 @@ async fn a_malformed_vertex_pair_is_rejected_before_the_handler() {
     let client = Client::new();
     let base = spawn_app().await;
 
-    // `Vec<Vec<[i32; 2]>>` makes serde reject this during extraction, hence 422 not 400.
+    // Deliberately *not* run through `polys` — this is the bare pre-attribute shape, which
+    // `Vec<ObstaclePoly>` cannot parse at all. Rejected by serde during extraction, hence
+    // 422 rather than the 400 `validate_polygons` would give: the handler never runs.
     let res = post_grid(
         &client,
         &base,
@@ -500,6 +556,343 @@ async fn a_malformed_vertex_pair_is_rejected_before_the_handler() {
     .await;
 
     assert_eq!(res.status(), 422);
+}
+
+#[tokio::test]
+async fn a_vertex_missing_a_coordinate_is_rejected_before_the_handler() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // The envelope is right but a vertex is half a vertex. Also 422: `CellVertex` requires
+    // both fields, so this dies in extraction too.
+    let res = post_grid(
+        &client,
+        &base,
+        grid_body(
+            &unique_name(),
+            10,
+            10,
+            json!([{ "id": 0, "dynamic": false, "vertices": [{"x": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] }]),
+        ),
+    )
+    .await;
+
+    assert_eq!(res.status(), 422);
+}
+
+#[tokio::test]
+async fn obstacles_sharing_an_id_are_rejected() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // The id is what lets a later snapshot say *which* obstacle moved, so two shapes claiming
+    // one is a payload with no single interpretation. A 400 rather than a 422: the shape parses
+    // fine, it is the content that is wrong.
+    let res = post_grid(
+        &client,
+        &base,
+        grid_body(
+            &unique_name(),
+            10,
+            10,
+            json!([
+                { "id": 4, "dynamic": false, "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
+                { "id": 4, "dynamic": true,  "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
+            ]),
+        ),
+    )
+    .await;
+
+    assert_eq!(res.status(), 400);
+    let message = res.text().await.unwrap();
+    assert!(
+        message.contains("share id 4"),
+        "the error should name the clashing id: {message}"
+    );
+}
+
+#[tokio::test]
+async fn the_dynamic_flag_survives_a_round_trip() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // `dynamic` is the whole point of the envelope, so it has to come back as it went in —
+    // per obstacle, and independently.
+    let polygons = json!([
+        { "id": 1, "dynamic": true,  "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
+        { "id": 2, "dynamic": false, "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
+    ]);
+
+    let created = create_grid(&client, &base, 10, 10, polygons.clone()).await;
+    assert_eq!(created["obs_polygons"], polygons, "the response echoes it");
+
+    let stored = show_grid(&client, &base, created["id"].as_i64().unwrap()).await;
+    assert_eq!(stored["obs_polygons"][0]["dynamic"], true);
+    assert_eq!(stored["obs_polygons"][1]["dynamic"], false);
+    assert_eq!(
+        stored["obs_polygons"][0]["id"], 1,
+        "ids are stored, not renumbered"
+    );
+    assert_eq!(stored["obs_polygons"][1]["id"], 2);
+}
+
+// --- replan: one tick of a simulation ------------------------------------
+
+async fn post_replan(
+    client: &Client,
+    base: &str,
+    grid_id: i64,
+    src: [i32; 2],
+    dest: [i32; 2],
+    obstacles: &Value,
+    seed: Option<u64>,
+) -> reqwest::Response {
+    let mut body = json!({
+        "src_vertex": src,
+        "dest_vertex": dest,
+        "obs_polygons": obstacles,
+    });
+    if let Some(seed) = seed {
+        body["seed"] = json!(seed);
+    }
+    client
+        .post(format!("{base}/grids/{grid_id}/replan"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A dynamic square with room to wobble, well clear of the route's endpoints.
+fn wobbly_square() -> Value {
+    json!([{
+        "id": 1,
+        "dynamic": true,
+        "vertices": [
+            {"x": 3, "y": 3}, {"x": 5, "y": 3}, {"x": 5, "y": 5},
+            {"x": 3, "y": 5}, {"x": 3, "y": 3},
+        ],
+    }])
+}
+
+#[tokio::test]
+async fn replan_returns_a_route_and_the_moved_obstacles() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(&client, &base, 10, 10, wobbly_square()).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    let res = post_replan(
+        &client,
+        &base,
+        grid_id,
+        [0, 0],
+        [9, 9],
+        &wobbly_square(),
+        Some(12345),
+    )
+    .await;
+
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["reachable"], true);
+    assert!(body["cost"].as_i64().unwrap() > 0);
+    assert_eq!(body["planner"], "d_star_lite", "replan is D* Lite's job");
+    // The geometry comes back so the caller can draw it and send it on to the next tick.
+    assert_eq!(body["obs_polygons"].as_array().unwrap().len(), 1);
+    assert_eq!(body["obs_polygons"][0]["id"], 1);
+    assert_eq!(body["obs_polygons"][0]["dynamic"], true);
+    assert!(
+        body["next_seed"].as_u64().is_some(),
+        "the run must be continuable"
+    );
+
+    let route = body["vertices"].as_array().unwrap();
+    assert_eq!(route.first().unwrap(), &json!([0, 0]));
+    assert_eq!(route.last().unwrap(), &json!([9, 9]));
+}
+
+#[tokio::test]
+async fn replan_stores_nothing() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(&client, &base, 10, 10, wobbly_square()).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    for _ in 0..5 {
+        let res = post_replan(
+            &client,
+            &base,
+            grid_id,
+            [0, 0],
+            [9, 9],
+            &wobbly_square(),
+            Some(7),
+        )
+        .await;
+        assert_eq!(res.status(), 200);
+    }
+
+    // The point of a stateless tick: no plan rows, so the grid never freezes and a long run
+    // leaves no debris. The stored geometry is still the initial condition, not tick 5's.
+    assert!(
+        list_plans(&client, &base, grid_id).await.is_empty(),
+        "replan should not persist plans",
+    );
+    let stored = show_grid(&client, &base, grid_id).await;
+    assert_eq!(
+        stored["obs_polygons"],
+        wobbly_square(),
+        "replan must not rewrite the grid",
+    );
+    // And with no plans, the grid is still editable.
+    let res = put_grid(&client, &base, grid_id, edited(&grid, 10, 10, json!([]))).await;
+    assert_eq!(res.status(), 200, "a replanned grid must not be frozen");
+}
+
+#[tokio::test]
+async fn replan_is_reproducible_from_its_seed() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(&client, &base, 10, 10, wobbly_square()).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    // Chaining `next_seed` is what makes a whole run replayable, so the chain is what's
+    // compared — not just one tick.
+    let run = async |seed: u64| {
+        let mut obstacles = wobbly_square();
+        let mut seed = Some(seed);
+        let mut trace = Vec::new();
+        for _ in 0..6 {
+            let res = post_replan(&client, &base, grid_id, [0, 0], [9, 9], &obstacles, seed).await;
+            assert_eq!(res.status(), 200);
+            let body: Value = res.json().await.unwrap();
+            obstacles = body["obs_polygons"].clone();
+            seed = body["next_seed"].as_u64();
+            trace.push((obstacles.clone(), body["cost"].clone()));
+        }
+        trace
+    };
+
+    assert_eq!(run(999).await, run(999).await, "same seed, different run");
+    assert_ne!(
+        run(999).await,
+        run(1000).await,
+        "the seed made no difference"
+    );
+}
+
+#[tokio::test]
+async fn replan_leaves_a_static_obstacle_where_it_is() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[3, 3], [5, 3], [5, 5]]])),
+    )
+    .await;
+    let grid_id = grid["id"].as_i64().unwrap();
+    let statics = polys(json!([[[3, 3], [5, 3], [5, 5]]]));
+
+    let res = post_replan(&client, &base, grid_id, [0, 0], [9, 9], &statics, Some(1)).await;
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+
+    assert_eq!(body["moved"], 0, "nothing was flagged dynamic");
+    assert_eq!(body["obs_polygons"], statics, "a static obstacle drifted");
+}
+
+#[tokio::test]
+async fn replan_rejects_obstacles_off_the_grid() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(&client, &base, 10, 10, json!([])).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    // The caller's geometry is a payload like any other, not something to be trusted because a
+    // previous response produced it — an out-of-bounds vertex would reach the rasterizer.
+    let res = post_replan(
+        &client,
+        &base,
+        grid_id,
+        [0, 0],
+        [9, 9],
+        &polys(json!([[[0, 0], [10, 0], [0, 5]]])),
+        Some(1),
+    )
+    .await;
+
+    assert_eq!(res.status(), 400);
+}
+
+#[tokio::test]
+async fn replan_reports_an_unreachable_goal_without_failing() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(&client, &base, 5, 5, json!([])).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    // A wall sealing the goal into a corner. An obstacle wandering into that position is an
+    // outcome the caller wants to watch, so it is a 200 saying "no route" rather than a 4xx that
+    // would end the run.
+    let wall = json!([{
+        "id": 1,
+        "dynamic": false,
+        "vertices": [{"x": 3, "y": 0}, {"x": 3, "y": 4}, {"x": 3, "y": 4}, {"x": 3, "y": 0}],
+    }]);
+
+    let res = post_replan(&client, &base, grid_id, [0, 0], [4, 0], &wall, Some(1)).await;
+
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["reachable"], false);
+    assert_eq!(body["cost"], 0);
+    assert_eq!(body["vertices"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn replan_on_an_unknown_grid_is_404() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let res = post_replan(&client, &base, 999_999, [0, 0], [1, 1], &json!([]), Some(1)).await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn a_dynamic_obstacle_still_blocks_the_route_it_covers() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // `dynamic` is a label about what a *simulation* may later do; it must not change what the
+    // rasterizer or the planner make of the shape right now. A wall from (2,0) to (2,3) on a
+    // 5-high grid leaves row 4 as the only way past, so the route has to detour either way.
+    let wall = |dynamic: bool| {
+        json!([{
+            "id": 0,
+            "dynamic": dynamic,
+            "vertices": [{"x": 2, "y": 0}, {"x": 2, "y": 3}, {"x": 2, "y": 3}, {"x": 2, "y": 0}],
+        }])
+    };
+
+    let mut costs = Vec::new();
+    for dynamic in [false, true] {
+        let grid = create_grid(&client, &base, 5, 5, wall(dynamic)).await;
+        let res = post_plan(&client, &base, grid["id"].as_i64().unwrap(), [0, 0], [4, 0]).await;
+        assert_eq!(res.status(), 201);
+        let plan: Value = res.json().await.unwrap();
+        assert_eq!(
+            plan["meta"]["reachable"], true,
+            "row 4 should still be open"
+        );
+        costs.push(plan["meta"]["cost"].as_i64().unwrap());
+    }
+    assert_eq!(
+        costs[0], costs[1],
+        "the flag changed the route it was planned on",
+    );
 }
 
 #[tokio::test]
@@ -525,9 +918,16 @@ async fn obs_polygons_is_a_required_field() {
 async fn update_grid_replaces_every_field() {
     let client = Client::new();
     let base = spawn_app().await;
-    let grid = create_grid(&client, &base, 10, 10, json!([[[0, 0], [3, 0], [3, 2]]])).await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[0, 0], [3, 0], [3, 2]]])),
+    )
+    .await;
     let grid_id = grid["id"].as_i64().unwrap();
-    let replacement = json!([[[1, 1], [4, 1], [4, 3], [1, 3]]]);
+    let replacement = polys(json!([[[1, 1], [4, 1], [4, 3], [1, 3]]]));
     let renamed = unique_name();
 
     let res = put_grid(
@@ -561,7 +961,14 @@ async fn update_grid_replaces_every_field() {
 async fn update_grid_can_clear_the_obstacles() {
     let client = Client::new();
     let base = spawn_app().await;
-    let grid = create_grid(&client, &base, 10, 10, json!([[[0, 0], [3, 0], [3, 2]]])).await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[0, 0], [3, 0], [3, 2]]])),
+    )
+    .await;
     let grid_id = grid["id"].as_i64().unwrap();
 
     // PUT replaces rather than merges, so an empty list means "no obstacles" — not
@@ -590,7 +997,7 @@ async fn updating_an_unknown_grid_is_404() {
 async fn a_grid_may_grow_while_holding_obstacles() {
     let client = Client::new();
     let base = spawn_app().await;
-    let obstacles = json!([[[8, 8], [9, 8], [9, 9]]]);
+    let obstacles = polys(json!([[[8, 8], [9, 8], [9, 9]]]));
     let grid = create_grid(&client, &base, 10, 10, obstacles.clone()).await;
     let grid_id = grid["id"].as_i64().unwrap();
 
@@ -603,7 +1010,7 @@ async fn a_grid_may_grow_while_holding_obstacles() {
 async fn a_grid_cannot_shrink_below_its_obstacles() {
     let client = Client::new();
     let base = spawn_app().await;
-    let obstacles = json!([[[8, 8], [9, 8], [9, 9]]]);
+    let obstacles = polys(json!([[[8, 8], [9, 8], [9, 9]]]));
     let grid = create_grid(&client, &base, 10, 10, obstacles.clone()).await;
     let grid_id = grid["id"].as_i64().unwrap();
 
@@ -628,7 +1035,14 @@ async fn a_grid_cannot_shrink_below_its_obstacles() {
 async fn a_grid_may_shrink_once_the_obstacles_go_with_it() {
     let client = Client::new();
     let base = spawn_app().await;
-    let grid = create_grid(&client, &base, 10, 10, json!([[[8, 8], [9, 8], [9, 9]]])).await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[8, 8], [9, 8], [9, 9]]])),
+    )
+    .await;
     let grid_id = grid["id"].as_i64().unwrap();
 
     // The same shrink, with obstacles that fit the new bounds, is fine.
@@ -636,7 +1050,7 @@ async fn a_grid_may_shrink_once_the_obstacles_go_with_it() {
         &client,
         &base,
         grid_id,
-        edited(&grid, 5, 5, json!([[[1, 1], [3, 1], [3, 3]]])),
+        edited(&grid, 5, 5, polys(json!([[[1, 1], [3, 1], [3, 3]]]))),
     )
     .await;
 
@@ -654,7 +1068,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         &client,
         &base,
         grid_id,
-        edited(&grid, 10, 10, json!([[[0, 0], [1, 1]]])),
+        edited(&grid, 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
     .await;
     assert_eq!(too_few.status(), 400);
@@ -663,7 +1077,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         &client,
         &base,
         grid_id,
-        edited(&grid, 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
+        edited(&grid, 10, 10, polys(json!([[[0, 0], [10, 0], [0, 5]]]))),
     )
     .await;
     assert_eq!(out_of_bounds.status(), 400);
@@ -711,7 +1125,14 @@ async fn a_grid_is_editable_until_something_is_planned_against_it() {
 async fn the_freeze_covers_dimensions_as_well_as_obstacles() {
     let client = Client::new();
     let base = spawn_app().await;
-    let grid = create_grid(&client, &base, 10, 10, json!([[[5, 5], [7, 5], [7, 7]]])).await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[5, 5], [7, 5], [7, 7]]])),
+    )
+    .await;
     let grid_id = grid["id"].as_i64().unwrap();
     freeze_with_plan(&client, &base, grid_id).await;
 
@@ -779,10 +1200,17 @@ async fn a_new_version_is_a_new_row_leaving_the_original_intact() {
     let client = Client::new();
     let base = spawn_app().await;
     // Clear of the origin, so the freezing plan below has somewhere to start.
-    let grid = create_grid(&client, &base, 10, 10, json!([[[4, 4], [6, 4], [6, 6]]])).await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        polys(json!([[[4, 4], [6, 4], [6, 6]]])),
+    )
+    .await;
     let grid_id = grid["id"].as_i64().unwrap();
     freeze_with_plan(&client, &base, grid_id).await;
-    let replacement = json!([[[6, 6], [8, 6], [8, 8]]]);
+    let replacement = polys(json!([[[6, 6], [8, 6], [8, 8]]]));
 
     let res = post_grid_version(
         &client,
@@ -867,7 +1295,7 @@ async fn a_new_version_enforces_the_same_obstacle_validation() {
         &client,
         &base,
         grid_id,
-        edited(&grid, 10, 10, json!([[[0, 0], [10, 0], [0, 5]]])),
+        edited(&grid, 10, 10, polys(json!([[[0, 0], [10, 0], [0, 5]]]))),
     )
     .await;
     assert_eq!(res.status(), 400);
@@ -1074,7 +1502,7 @@ async fn planning_routes_around_a_saved_obstacle() {
         &base,
         9,
         5,
-        json!([[[4, 0], [4, 3], [4, 3], [4, 0]]]),
+        polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
     )
     .await["id"]
         .as_i64()
@@ -1118,7 +1546,12 @@ async fn a_new_version_plans_against_its_own_obstacles() {
         &client,
         &base,
         grid_id,
-        edited(&grid, 9, 5, json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
+        edited(
+            &grid,
+            9,
+            5,
+            polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
+        ),
     )
     .await;
     assert_eq!(res.status(), 201);
@@ -1159,7 +1592,7 @@ async fn an_unreachable_goal_is_a_saved_plan_with_no_cells() {
         &base,
         5,
         3,
-        json!([[[2, 0], [2, 2], [2, 2], [2, 0]]]),
+        polys(json!([[[2, 0], [2, 2], [2, 2], [2, 0]]])),
     )
     .await["id"]
         .as_i64()
@@ -1185,7 +1618,7 @@ async fn planning_from_inside_an_obstacle_is_400() {
         &base,
         10,
         10,
-        json!([[[2, 2], [5, 2], [5, 5], [2, 5]]]),
+        polys(json!([[[2, 2], [5, 2], [5, 5], [2, 5]]])),
     )
     .await["id"]
         .as_i64()

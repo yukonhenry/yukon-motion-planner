@@ -352,8 +352,35 @@ button.subtle {
   font-variant-numeric: tabular-nums;
 }
 
-.obstacle-list button {
+/* Pushed to the right edge, next to Delete, so the rows read
+   "which shape / how big / what it does" left to right. */
+.obstacle-list__dynamic {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.obstacle-list__dynamic input {
+  cursor: pointer;
+  margin: 0;
+}
+
+.obstacle-list__dynamic:has(input:checked) {
+  color: var(--accent);
+}
+
+.obstacle-list__dynamic:has(input:disabled) {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* `margin-left: auto` moved to the checkbox above, which now comes first. */
+.obstacle-list button {
   padding: 2px 6px;
   font-size: 12px;
 }

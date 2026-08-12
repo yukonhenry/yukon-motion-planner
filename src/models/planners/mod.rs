@@ -64,9 +64,9 @@ pub(crate) trait Planner {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlannerKind {
     AStar,
-    /// `allow(dead_code)` only because nothing *selects* a planner yet — the handler hardcodes
-    /// `AStar`. Giving `PlanInput` a `planner` field is what retires this attribute.
-    #[allow(dead_code)]
+    /// Used by `POST /grids/{id}/replan`, where replanning a just-changed world is the whole
+    /// point. `POST /grids/{id}/plans` still hardcodes `AStar`; letting a client choose means
+    /// giving `PlanInput` a `planner` field.
     DStarLite,
 }
 

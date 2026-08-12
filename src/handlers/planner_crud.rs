@@ -1,14 +1,17 @@
 use crate::entities::plans;
+use crate::handlers::grid_crud::validate_polygons;
 use crate::handlers::helpers::{AppError, find_grid};
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
+use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
 use crate::models::planners::{PlanError, PlannerKind};
+use crate::models::rng::Xorshift;
 use crate::router::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PlanInput {
@@ -44,19 +47,18 @@ pub(crate) async fn generate_grid_plan(
     let grid = find_grid(&state.db, id).await?;
     let mut grid_world = GridWorldManager::<Cell>::new(grid.width as usize, grid.height as usize);
 
-    // Decode polygons from the stored JSON, which is an array of arrays of vertices, each vertex
-    // being a two-element array of x,y coordinates. The DB column is JSON, so the
-    // deserialization is a two-step process: first to a `serde_json::Value`, then to the typed structure.
-    let polygons = grid
-        .obs_polygons
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .map(|obstacle| serde_json::from_value::<Vec<[i32; 2]>>(obstacle.clone()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AppError::Invalid(format!("obstacle vertices are malformed: {e}")))?;
+    // Decode the stored obstacles. The DB column is `jsonb`, so sea-orm hands it over as an
+    // untyped `Value` and the shape is re-established here — see
+    // [`ObstaclePoly`](crate::models::obstacle::ObstaclePoly) for what it is.
+    //
+    // Decoded whole rather than per element, so one malformed obstacle rejects the request
+    // instead of leaving a grid rasterized from the shapes that happened to parse.
+    let obstacles: Vec<ObstaclePoly> = serde_json::from_value(grid.obs_polygons.clone())
+        .map_err(|e| AppError::Invalid(format!("stored obstacles are malformed: {e}")))?;
 
-    // Fill obstacle cells by filling in obstacle polygons.
+    // Only the geometry reaches the rasterizer: `id` and `dynamic` say nothing about which
+    // cells a shape covers right now.
+    let polygons: Vec<Vec<[i32; 2]>> = obstacles.iter().map(ObstaclePoly::cells).collect();
     grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
 
     // One value picks both the search and the name recorded below. Once `PlanInput` carries a
@@ -97,6 +99,112 @@ pub(crate) async fn generate_grid_plan(
 
     let saved = new_plan.insert(&state.db).await?;
     Ok((StatusCode::CREATED, Json(saved)))
+}
+
+// Request body for `POST /grids/{id}/replan` — one tick of a simulation.
+//
+// The obstacles come from the *client*, not the stored grid row, because they are the evolving
+// state: tick 5 has to perturb the shapes as tick 4 left them. The stored row is the initial
+// condition and stays untouched, which is what keeps this from colliding with the freeze rule —
+// a run of a hundred ticks would otherwise be a hundred grid versions.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReplanInput {
+    src_vertex: [i32; 2],
+    dest_vertex: [i32; 2],
+    /// Where the obstacles are *now*, as the previous response left them.
+    obs_polygons: Vec<ObstaclePoly>,
+    /// Omit on the first tick; afterwards pass back the `next_seed` from the last response.
+    ///
+    /// Chaining the seed rather than sending a tick number is what makes a whole run replayable
+    /// from its first value: consecutive small integers are not independent xorshift seeds, so
+    /// `seed = tick` would produce a correlated, uninteresting walk.
+    ///
+    /// `u32` and not `u64` because the client is JavaScript, where every JSON number is a
+    /// double: a `u64` above 2^53 would come back with its low bits rounded away, and the chain
+    /// would break silently — the run would still look fine and simply not replay.
+    seed: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReplanOutput {
+    /// The obstacles *after* the tick — what the caller should draw, and send back next time.
+    obs_polygons: Vec<ObstaclePoly>,
+    /// The recomputed route as `[x, y]` cells, empty when the goal is walled off.
+    vertices: Vec<(usize, usize)>,
+    reachable: bool,
+    cost: u32,
+    /// How many obstacles actually moved. Zero means the tick was a no-op — every obstacle is
+    /// static, or every draw clamped against an edge — so the route is unchanged by construction.
+    moved: usize,
+    /// Pass as `seed` on the next tick to continue this run. See [`ReplanInput::seed`] for why
+    /// this is 32 bits wide.
+    next_seed: u32,
+    planner: &'static str,
+}
+
+// POST /grids/{id}/replan — advance the simulation one tick and replan.
+//
+// Deliberately does *not* store a plan. A stored plan is what freezes a grid, and a per-tick row
+// would both freeze the row this run is exploring and bury the user's real saved routes under
+// simulation debris. Ticks are ephemeral; `POST /grids/{id}/plans` is still how a plan is kept.
+pub(crate) async fn replan_grid(
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(payload): Json<ReplanInput>,
+) -> Result<Json<ReplanOutput>, AppError> {
+    // The grid supplies the dimensions the jitter clamps against and the plan runs on. Obstacle
+    // geometry is the caller's; everything else is still the stored snapshot's.
+    let grid = find_grid(&state.db, id).await?;
+
+    // The caller's obstacles are re-validated rather than trusted: they arrive over the wire like
+    // any other payload, and a shape off the edge of the grid would panic the rasterizer.
+    let mut obstacles = payload.obs_polygons;
+    validate_polygons(&obstacles, grid.width, grid.height)?;
+
+    let mut rng = Xorshift::new(payload.seed.map_or_else(seed_from_clock, u64::from));
+    let moved = advance_one_tick(&mut obstacles, &mut rng, grid.width, grid.height);
+
+    let mut grid_world = GridWorldManager::<Cell>::new(grid.width as usize, grid.height as usize);
+    let polygons: Vec<Vec<[i32; 2]>> = obstacles.iter().map(ObstaclePoly::cells).collect();
+    grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
+
+    // D* Lite specifically: replanning against a world that just changed is the case it exists
+    // for. It plans from scratch each call for now — the state that would make it incremental
+    // cannot survive a stateless request.
+    let kind = PlannerKind::DStarLite;
+    let mut planner = kind.planner();
+
+    let route =
+        match grid_world.find_plan(payload.src_vertex, payload.dest_vertex, planner.as_mut()) {
+            Ok(route) => route,
+            // A jittering obstacle sealing the goal off is an expected outcome of a run, not a bad
+            // request — the caller wants to see it happen and keep ticking.
+            Err(PlanError::Unreachable) => Vec::new(),
+            Err(err) => return Err(AppError::Invalid(err.to_string())),
+        };
+
+    Ok(Json(ReplanOutput {
+        obs_polygons: obstacles,
+        vertices: route.iter().map(|&cell| grid_world.xy(cell)).collect(),
+        reachable: !route.is_empty(),
+        cost: grid_world.path_cost(&route),
+        moved,
+        // The high half: xorshift's low bits are the weaker ones, so truncating from the top
+        // gives a better next seed than masking off the bottom would.
+        next_seed: (rng.next_u64() >> 32) as u32,
+        planner: kind.name(),
+    }))
+}
+
+/// A starting seed for a caller that did not bring one.
+///
+/// Only ever used for the first tick of a run: from then on the seed is chained through the
+/// response, so the run stays replayable even though it began somewhere arbitrary.
+fn seed_from_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x2026_0811)
 }
 
 // DELETE /plans/{plan_id} — delete one plan.

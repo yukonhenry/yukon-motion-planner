@@ -1,7 +1,9 @@
 use crate::handlers::grid_crud::{
     create_grid, create_grid_version, delete_grid, list_grids, show_grid, update_grid,
 };
-use crate::handlers::planner_crud::{delete_plan, generate_grid_plan, list_grid_plans};
+use crate::handlers::planner_crud::{
+    delete_plan, generate_grid_plan, list_grid_plans, replan_grid,
+};
 use axum::{Router, routing};
 use sea_orm::DatabaseConnection;
 
@@ -36,6 +38,10 @@ pub async fn route(db: DatabaseConnection) -> Router {
             "/grids/{id}/plans",
             routing::get(list_grid_plans).post(generate_grid_plan),
         )
+        // One tick of a moving-obstacle simulation. Stores nothing — the caller holds the
+        // evolving geometry and the grid row stays the initial condition, so a run does not
+        // freeze the grid or leave a plan row per frame.
+        .route("/grids/{id}/replan", routing::post(replan_grid))
         .route("/plans/{plan_id}", routing::delete(delete_plan))
         .with_state(state)
 }
