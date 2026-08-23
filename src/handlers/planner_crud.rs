@@ -6,6 +6,7 @@ use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
 use crate::models::planners::{PlanError, PlannerKind};
 use crate::models::rng::Xorshift;
+use crate::models::simulation::plan_route;
 use crate::router::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -156,43 +157,36 @@ pub(crate) async fn replan_grid(
     // geometry is the caller's; everything else is still the stored snapshot's.
     let grid = find_grid(&state.db, id).await?;
 
-    // The caller's obstacles are re-validated rather than trusted: they arrive over the wire like
-    // any other payload, and a shape off the edge of the grid would panic the rasterizer.
+    // Revalidate the obstacles against the grid's dimensions.
     let mut obstacles = payload.obs_polygons;
     validate_polygons(&obstacles, grid.width, grid.height)?;
 
     let mut rng = Xorshift::new(payload.seed.map_or_else(seed_from_clock, u64::from));
     let moved = advance_one_tick(&mut obstacles, &mut rng, grid.width, grid.height);
 
-    let mut grid_world = GridWorldManager::<Cell>::new(grid.width as usize, grid.height as usize);
-    let polygons: Vec<Vec<[i32; 2]>> = obstacles.iter().map(ObstaclePoly::cells).collect();
-    grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
-
-    // D* Lite specifically: replanning against a world that just changed is the case it exists
-    // for. It plans from scratch each call for now — the state that would make it incremental
-    // cannot survive a stateless request.
-    let kind = PlannerKind::DStarLite;
-    let mut planner = kind.planner();
-
-    let route =
-        match grid_world.find_plan(payload.src_vertex, payload.dest_vertex, planner.as_mut()) {
-            Ok(route) => route,
-            // A jittering obstacle sealing the goal off is an expected outcome of a run, not a bad
-            // request — the caller wants to see it happen and keep ticking.
-            Err(PlanError::Unreachable) => Vec::new(),
-            Err(err) => return Err(AppError::Invalid(err.to_string())),
-        };
+    // Replan against the new geometry. The route is computed from the obstacles the caller
+    // just sent, not the stored row, so a run can explore a moving world without freezing the
+    // grid or leaving a plan row per tick.
+    let route = plan_route(
+        grid.width,
+        grid.height,
+        &obstacles,
+        payload.src_vertex,
+        payload.dest_vertex,
+        PlannerKind::DStarLite,
+    )
+        .map_err(|err| AppError::Invalid(err.to_string()))?;
 
     Ok(Json(ReplanOutput {
         obs_polygons: obstacles,
-        vertices: route.iter().map(|&cell| grid_world.xy(cell)).collect(),
-        reachable: !route.is_empty(),
-        cost: grid_world.path_cost(&route),
+        vertices: route.vertices,
+        reachable: route.reachable,
+        cost: route.cost,
         moved,
         // The high half: xorshift's low bits are the weaker ones, so truncating from the top
         // gives a better next seed than masking off the bottom would.
         next_seed: (rng.next_u64() >> 32) as u32,
-        planner: kind.name(),
+        planner: route.planner,
     }))
 }
 

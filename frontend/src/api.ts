@@ -5,6 +5,8 @@ import type {
   Plan,
   ReplanInput,
   ReplanResult,
+  SimStatus,
+  StartSimInput,
   Vertex,
 } from './types';
 
@@ -113,3 +115,43 @@ export const replan = (gridId: number, input: ReplanInput) =>
     method: 'POST',
     body: JSON.stringify(input),
   });
+
+// --- backend-scheduled simulation ----------------------------------------
+
+/**
+ * Hands a grid and one of its plans to the backend scheduler.
+ *
+ * From here the server owns the clock: an environment task jitters the obstacles every
+ * `grid_worlds.sim_interval`, a replanner task recomputes the route every
+ * `replan_interval` seconds, and both push to {@link simStreamUrl}. Unlike {@link replan},
+ * the caller no longer holds the run's state — the server does, and the browser only draws
+ * it.
+ *
+ * 409s if a run is already going on this grid, 400 if nothing on it is dynamic.
+ */
+export const startSim = (gridId: number, input: StartSimInput) =>
+  request<SimStatus>(`/grids/${gridId}/sim/start`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+
+/** Ends the run. Subscribers get a final `stopped` event before the stream closes. */
+export const stopSim = (gridId: number) =>
+  request<void>(`/grids/${gridId}/sim/stop`, { method: 'POST' });
+
+/**
+ * The run in progress, or a 404 if there is none.
+ *
+ * How a reloaded page finds its way back into a run it started before the refresh: the
+ * status is the whole picture as of now, and the stream continues from there.
+ */
+export const simStatus = (gridId: number) => request<SimStatus>(`/grids/${gridId}/sim`);
+
+/**
+ * Where to point an `EventSource` for one run's events.
+ *
+ * A URL rather than a wrapper, because the lifetime of the connection belongs to the
+ * component that opens it — see `useSimRun`. Same-origin through the Vite proxy, like every
+ * other path here.
+ */
+export const simStreamUrl = (gridId: number) => `/api/grids/${gridId}/sim/stream`;

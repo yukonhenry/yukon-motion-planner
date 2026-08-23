@@ -10,6 +10,7 @@ import {MIN_VERTICES, validateObstacles, validateVertices} from './geometry';
 import {draftToInput, fromWire, toWire, useGridDraft} from './hooks/useGridDraft';
 import {useGrids} from './hooks/useGrids';
 import {usePlans} from './hooks/usePlans';
+import {useSimRun} from './hooks/useSimRun';
 import type {Endpoint, Obstacle, Vertex} from './types';
 
 const NO_ENDPOINTS: Record<Endpoint, Vertex | null> = {src: null, dest: null};
@@ -59,6 +60,14 @@ export default function App() {
     const [stepping, setStepping] = useState(false);
 
     const plans = usePlans(gridId);
+    /**
+     * The backend-scheduled run, which is a different thing from `sim` above.
+     *
+     * `sim` is the manual clock — the browser advancing time one request per click. This is
+     * the server advancing it on two schedules of its own and pushing the results. Only one
+     * can be going at a time, and the live run wins the canvas when it is.
+     */
+    const live = useSimRun(gridId);
     const {
         draft,
         dirty,
@@ -249,13 +258,59 @@ export default function App() {
     // --- simulation --------------------------------------------------------
 
     /**
-     * What the canvas is showing: the run's obstacles once one is going, else the working copy.
+     * What the canvas is showing: the backend run's obstacles if one is going, else a manual
+     * run's, else the working copy.
      *
      * The draft is what a *save* would write, so it stays the source of truth for the shapes the
      * user drew; this is only what is on screen.
      */
-    const shownObstacles = sim?.obstacles ?? draft?.obstacles ?? [];
+    const shownObstacles = live.run?.obstacles ?? sim?.obstacles ?? draft?.obstacles ?? [];
     const dynamicCount = shownObstacles.filter((o) => o.dynamic).length;
+
+    /** The plan a backend run is anchored to, which is where its endpoints come from. */
+    const anchorPlan = useMemo(
+        () =>
+            live.run
+                ? (plans.plans.find((p) => p.id === live.run?.planId) ?? null)
+                : (plans.active ?? null),
+        [live.run, plans.plans, plans.active],
+    );
+
+    /**
+     * Why a backend run cannot start, or `null`.
+     *
+     * Every reason is about the *stored* rows, because that is all a run reads: it takes the
+     * grid's obstacles and the plan's endpoints from the database once, at start. Pending edits
+     * are therefore not merely ignored — they would be invisible, which is worth refusing over.
+     */
+    const runBlocked =
+        savedGrid === null
+            ? 'Save the grid first — a run simulates the stored grid.'
+            : dirty
+              ? 'Save or revert the pending edits first — a run reads the stored obstacles.'
+              : anchorPlan === null
+                ? 'Generate or select a saved route first — a run replans between its endpoints.'
+                : dynamicCount === 0
+                  ? 'Mark at least one obstacle dynamic — the server refuses a run that cannot change.'
+                  : null;
+
+    /**
+     * The start and goal to draw. A live run replans between the endpoints stored in *its*
+     * plan's meta, which need not be whichever route the user last selected — so during a run
+     * the markers follow the run rather than the selection.
+     */
+    const marks =
+        live.run && anchorPlan
+            ? {src: anchorPlan.meta.src_vertex, dest: anchorPlan.meta.dest_vertex}
+            : shown;
+
+    const startRun = useCallback(() => {
+        if (!anchorPlan) return;
+        // Manual stepping and a scheduled run are two clocks over one world; letting both go
+        // would put two sets of obstacles on one canvas.
+        setSim(null);
+        void live.start(anchorPlan.id);
+    }, [anchorPlan, live]);
 
     /**
      * Why a tick cannot run, or `null`. Every reason is about the *server's* view: replan plans
@@ -331,7 +386,7 @@ export default function App() {
     }, [selectedId, removeObstacle]);
 
     // Saving is the most recent thing the user asked for, so its failure wins the slot.
-    const status = saveError ?? plans.error ?? draftState.error ?? grids.error;
+    const status = saveError ?? live.error ?? plans.error ?? draftState.error ?? grids.error;
 
     return (
         <div className="app">
@@ -447,7 +502,7 @@ export default function App() {
                             if (id === selectedId) setSelectedId(null);
                         }}
                         onSetDynamic={setObstacleDynamic}
-                        readOnly={frozen || sim !== null}
+                        readOnly={frozen || sim !== null || live.run !== null}
                     />
                 )}
 
@@ -460,6 +515,11 @@ export default function App() {
                         pending={stepping}
                         onStep={() => void step()}
                         onReset={resetSim}
+                        run={live.run}
+                        runBlocked={runBlocked}
+                        runPending={live.pending}
+                        onStart={startRun}
+                        onStop={() => void live.stop()}
                     />
                 )}
 
@@ -487,13 +547,24 @@ export default function App() {
                         onDraftAppend={(cell) => setPencil((d) => (d ? [...d, cell] : [cell]))}
                         // Dragging a shape during a run would edit the *draft* while the canvas
                         // shows the run's geometry — two different sets of shapes, one of them
-                        // invisible. Reset first.
-                        onUpdate={sim ? () => {} : updateObstacle}
+                        // invisible. Reset or stop first.
+                        onUpdate={sim || live.run ? () => {} : updateObstacle}
                         picking={picking}
                         onPickCell={placeEndpoint}
-                        src={shown.src}
-                        dest={shown.dest}
-                        route={sim ? sim.route : dirty ? null : (plans.active?.vertices ?? null)}
+                        src={marks.src}
+                        dest={marks.dest}
+                        // A live run's route until its first replan lands, and the anchoring
+                        // plan's route in the meantime — the run started from it, so it is the
+                        // right thing to show against tick 0 rather than a blank canvas.
+                        route={
+                            live.run
+                                ? (live.run.route ?? anchorPlan?.vertices ?? null)
+                                : sim
+                                  ? sim.route
+                                  : dirty
+                                    ? null
+                                    : (plans.active?.vertices ?? null)
+                        }
                         showFootprint={showFootprint}
                     />
                 )}

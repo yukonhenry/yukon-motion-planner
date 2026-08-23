@@ -55,6 +55,13 @@ export interface Grid extends GridSize {
 /** `GET /grids/{id}` — the whole snapshot, obstacles included. */
 export interface GridDetail extends Grid {
     obs_polygons: WireObstacle[];
+    /**
+     * Seconds between environment ticks when this grid is simulated by the backend.
+     *
+     * Absent from {@link Grid} because the listing is a partial model that does not select
+     * it — a run reads it from the stored row, not from anything the client sends.
+     */
+    sim_interval: number;
 }
 
 /** Body of `POST /grids`, `PUT /grids/{id}` and `POST /grids/{id}/versions`. */
@@ -146,4 +153,72 @@ export interface Plan {
      */
     vertices: Vertex[];
     meta: PlanMeta;
+}
+
+// --- backend-scheduled simulation ----------------------------------------
+
+/**
+ * A run in progress, as `POST /grids/{id}/sim/start` and `GET /grids/{id}/sim` report it.
+ *
+ * Carries the opening snapshot as well as the parameters, so the canvas is correct the
+ * instant a run starts rather than one tick later. The event stream carries it forward from
+ * this point.
+ */
+export interface SimStatus {
+    grid_id: number;
+    plan_id: number;
+    /** Seconds between environment ticks — `grid_worlds.sim_interval`. */
+    env_interval: number;
+    /** Seconds between replans, as the start request asked for it. */
+    replan_interval: number;
+    env_tick: number;
+    obs_polygons: WireObstacle[];
+    /** Where the walk is up to, for replaying a run that turned out interesting. */
+    seed: number;
+}
+
+/**
+ * One event off `GET /grids/{id}/sim/stream`.
+ *
+ * Every variant carries a *whole* snapshot rather than a delta, which is what makes a client
+ * that fell behind self-correcting: the next event puts it right, with no resync protocol.
+ */
+export type SimEvent =
+    | {
+    type: 'environment';
+    tick: number;
+    /** How many obstacles moved; 0 means every draw clamped against an edge. */
+    moved: number;
+    obs_polygons: WireObstacle[];
+}
+    | {
+    type: 'plan';
+    /** The replanner's own count, independent of the environment's. */
+    tick: number;
+    /**
+     * Which environment tick this route was planned against. The gap to the latest
+     * `environment` tick is how far the planner is running behind the world.
+     */
+    env_tick: number;
+    vertices: Vertex[];
+    reachable: boolean;
+    cost: number;
+    planner: string;
+    elapsed_ms: number;
+}
+    | { type: 'stopped'; reason: string };
+
+/** Body of `POST /grids/{id}/sim/start`. */
+export interface StartSimInput {
+    /** The plan to keep replanning; supplies the endpoints. */
+    plan_id: number;
+    /**
+     * Seconds between replans. Omit for the server's default.
+     *
+     * A property of the run rather than of the plan: the same saved route watched at two
+     * frequencies is the experiment, and neither watching changes the row.
+     */
+    replan_interval?: number;
+    /** Omit to start somewhere arbitrary — the response reports where. */
+    seed?: number;
 }

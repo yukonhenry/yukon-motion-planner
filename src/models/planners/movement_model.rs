@@ -34,7 +34,7 @@ impl GridWorldManager<Cell> {
     /// Forbidding steps never disturbs [`octile_heuristic`](Self::octile_heuristic_h):
     /// removing edges can only make the true cost higher, so a heuristic that already
     /// never overestimated still doesn't.
-    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item=NodeId> + '_ {
+    pub fn passable_neighbors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let (x, y) = self.xy(id);
 
         self.neighbors8(id).filter(move |&next| {

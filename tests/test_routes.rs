@@ -19,7 +19,7 @@
 use std::env;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use migration::{Migrator, MigratorTrait};
 use reqwest::Client;
@@ -1803,4 +1803,324 @@ async fn deleting_an_unknown_plan_is_404() {
 
     assert_eq!(res.status(), 404);
     assert!(res.text().await.unwrap().contains("plan 999999 not found"));
+}
+
+// --- sim: the backend-scheduled run --------------------------------------
+//
+// A run is anchored to a saved plan: that plan supplies the endpoints to keep replanning
+// between; the grid supplies the obstacles and, through `grid_worlds.sim_interval`, how often
+// the world moves. How often to replan is a property of the run rather than of the plan, so
+// it rides in the start request. Building the grid and computing the first plan stay ordinary
+// synchronous requests — starting a run is what hands that finished situation to the
+// scheduler.
+//
+// Each test gets its own app instance, and so its own registry, which is what lets these run
+// in parallel without one test's run colliding with another's.
+
+/// Sets the world's frequency directly, since no route writes it yet.
+///
+/// Far below anything a person would configure, so a test observes several ticks in a
+/// fraction of a second rather than sleeping for whole ones.
+async fn set_env_interval(grid_id: i64, env: f64) {
+    let db = db().await;
+    db.execute_unprepared(&format!(
+        "update grid_worlds set sim_interval = {env} where id = {grid_id}"
+    ))
+    .await
+    .unwrap();
+}
+
+/// A start request that names the replanner's frequency as well as the plan.
+///
+/// The counterpart to [`set_env_interval`]: the world's clock is stored, the planner's is
+/// asked for per run, and a test that cares about the gap between them sets both.
+fn start_body(plan_id: i64, replan: f64) -> Value {
+    json!({ "plan_id": plan_id, "replan_interval": replan })
+}
+
+async fn post_sim_start(
+    client: &Client,
+    base: &str,
+    grid_id: i64,
+    body: Value,
+) -> reqwest::Response {
+    client
+        .post(format!("{base}/grids/{grid_id}/sim/start"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_sim_stop(client: &Client, base: &str, grid_id: i64) -> reqwest::Response {
+    client
+        .post(format!("{base}/grids/{grid_id}/sim/stop"))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A grid with one wobbling obstacle, a plan across it, and the world's clock turned right up.
+async fn runnable_grid(client: &Client, base: &str, env: f64) -> (i64, i64) {
+    let grid = create_grid(client, base, 10, 10, wobbly_square()).await;
+    let grid_id = grid["id"].as_i64().unwrap();
+
+    let res = post_plan(client, base, grid_id, [0, 0], [9, 9]).await;
+    assert_eq!(res.status(), 201, "plan setup should succeed");
+    let plan_id = res.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+
+    set_env_interval(grid_id, env).await;
+    (grid_id, plan_id)
+}
+
+/// Counts the events of each kind on a run's stream, reading until the run stops.
+///
+/// Collecting the whole body rather than streaming it works precisely because a stopped run
+/// closes its stream — which is itself the property worth resting a test on.
+async fn watch_until_stopped(base: &str, grid_id: i64, run_for: Duration) -> (usize, usize, bool) {
+    let stopping = base.to_string();
+    let stopper = tokio::spawn(async move {
+        tokio::time::sleep(run_for).await;
+        post_sim_stop(&Client::new(), &stopping, grid_id).await
+    });
+
+    let body = Client::new()
+        .get(format!("{base}/grids/{grid_id}/sim/stream"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert_eq!(stopper.await.unwrap().status(), 204);
+
+    (
+        body.matches("event: environment").count(),
+        body.matches("event: plan").count(),
+        body.contains("event: stopped"),
+    )
+}
+
+#[tokio::test]
+async fn starting_a_run_reports_both_frequencies_and_the_opening_snapshot() {
+    // The snapshot is what keeps the canvas correct at tick 0: without it a client would
+    // draw nothing until the first event landed.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.05).await;
+
+    let res = post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.2)).await;
+    assert_eq!(res.status(), 200);
+
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["grid_id"], grid_id);
+    assert_eq!(body["plan_id"], plan_id);
+    assert_eq!(
+        body["env_interval"], 0.05,
+        "the grid's column drives the world"
+    );
+    assert_eq!(
+        body["replan_interval"], 0.2,
+        "the request drives the planner"
+    );
+    assert_eq!(body["env_tick"], 0);
+    assert_eq!(body["obs_polygons"].as_array().unwrap().len(), 1);
+
+    post_sim_stop(&client, &base, grid_id).await;
+}
+
+#[tokio::test]
+async fn a_second_run_on_one_grid_is_a_conflict() {
+    // Two runs over one grid would be two sets of obstacles both claiming to be that world.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.05).await;
+
+    let first = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(first.status(), 200);
+
+    let second = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(second.status(), 409);
+    assert!(res_contains(second, "already running").await);
+
+    // And stopping frees it to run again.
+    assert_eq!(post_sim_stop(&client, &base, grid_id).await.status(), 204);
+    let third = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(third.status(), 200);
+    post_sim_stop(&client, &base, grid_id).await;
+}
+
+#[tokio::test]
+async fn a_plan_from_another_grid_cannot_anchor_a_run() {
+    // Its endpoints mean nothing here, and it would silently replan against the wrong world.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (_, plan_id) = runnable_grid(&client, &base, 0.05).await;
+    let (other_id, _) = runnable_grid(&client, &base, 0.05).await;
+
+    let res = post_sim_start(&client, &base, other_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(res.status(), 400);
+    assert!(res_contains(res, "belongs to grid").await);
+}
+
+#[tokio::test]
+async fn a_run_over_scenery_alone_is_refused() {
+    // It would tick forever without changing anything, which reads as a hung simulation.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid = create_grid(
+        &client,
+        &base,
+        10,
+        10,
+        json!([{
+            "id": 1,
+            "dynamic": false,
+            "vertices": [
+                {"x": 3, "y": 3}, {"x": 5, "y": 3}, {"x": 5, "y": 5},
+                {"x": 3, "y": 5}, {"x": 3, "y": 3},
+            ],
+        }]),
+    )
+    .await;
+    let grid_id = grid["id"].as_i64().unwrap();
+    let plan_id = freeze_with_plan(&client, &base, grid_id).await;
+
+    let res = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(res.status(), 400);
+    assert!(res_contains(res, "dynamic").await);
+}
+
+#[tokio::test]
+async fn an_unknown_plan_or_grid_is_404() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, _) = runnable_grid(&client, &base, 0.05).await;
+
+    assert_eq!(
+        post_sim_start(&client, &base, grid_id, json!({ "plan_id": 999_999 }))
+            .await
+            .status(),
+        404,
+    );
+    assert_eq!(
+        post_sim_start(&client, &base, 999_999, json!({ "plan_id": 1 }))
+            .await
+            .status(),
+        404,
+    );
+}
+
+#[tokio::test]
+async fn an_unusable_replan_interval_is_refused() {
+    // The frequency is a request field now, so a client can ask for one that would spawn a
+    // task saturating a core. Rejected before anything is spawned, and the grid is left
+    // startable rather than half-registered.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.05).await;
+
+    for bad in [0.0, -1.0, 0.000_1, 99_999.0] {
+        let res = post_sim_start(&client, &base, grid_id, start_body(plan_id, bad)).await;
+        assert_eq!(res.status(), 400, "{bad} was accepted as a replan interval");
+        assert!(res_contains(res, "is not between").await);
+    }
+
+    // Omitting it entirely is fine — the server has a default.
+    let res = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    assert_eq!(res.status(), 200);
+    post_sim_stop(&client, &base, grid_id).await;
+}
+
+#[tokio::test]
+async fn the_status_and_stream_of_a_grid_with_no_run_are_404() {
+    // A 404 rather than an idle stream, so a client can tell "not running" from "running and
+    // quiet" — which at a slow interval look identical otherwise.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, _) = runnable_grid(&client, &base, 0.05).await;
+
+    let status = client
+        .get(format!("{base}/grids/{grid_id}/sim"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 404);
+    assert_eq!(post_sim_stop(&client, &base, grid_id).await.status(), 404);
+}
+
+#[tokio::test]
+async fn the_two_schedules_tick_independently_and_the_stream_says_why_it_ended() {
+    // The feature in one test: over one stretch of time a 25ms world must outpace a 150ms
+    // planner, and the stream must close with a reason rather than simply going quiet.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.025).await;
+    assert_eq!(
+        post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.15))
+            .await
+            .status(),
+        200,
+    );
+
+    let (env, plans, stopped) =
+        watch_until_stopped(&base, grid_id, Duration::from_millis(600)).await;
+
+    assert!(env > 0, "the environment never ticked");
+    assert!(
+        env > plans,
+        "a 25ms world under a 150ms planner produced {env} environment and {plans} plan events",
+    );
+    assert!(stopped, "the stream ended without saying why");
+}
+
+#[tokio::test]
+async fn a_run_stores_nothing() {
+    // The invariant `POST /grids/{id}/replan` already had, now that a run can tick for
+    // minutes unattended: a hundred ticks must not be a hundred plan rows, and the grid row
+    // stays the initial condition rather than drifting to wherever the walk wandered.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.025).await;
+
+    let before = show_grid(&client, &base, grid_id).await;
+    assert_eq!(
+        post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.05))
+            .await
+            .status(),
+        200,
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Confirm it really ran, so this cannot pass by the simulation never having started.
+    let status: Value = client
+        .get(format!("{base}/grids/{grid_id}/sim"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        status["env_tick"].as_i64().unwrap() > 0,
+        "the run never ticked"
+    );
+    assert_ne!(
+        status["obs_polygons"], before["obs_polygons"],
+        "the obstacles never moved",
+    );
+
+    post_sim_stop(&client, &base, grid_id).await;
+
+    assert_eq!(
+        list_plans(&client, &base, grid_id).await.len(),
+        1,
+        "the run wrote plan rows",
+    );
+    assert_eq!(
+        show_grid(&client, &base, grid_id).await["obs_polygons"],
+        before["obs_polygons"],
+        "the run rewrote the stored grid",
+    );
 }

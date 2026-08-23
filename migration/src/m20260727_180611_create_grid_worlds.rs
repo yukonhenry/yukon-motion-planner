@@ -45,4 +45,5 @@ pub enum GridWorlds {
     Height,
     ObsPolygons,
     Version,
+    SimInterval,
 }

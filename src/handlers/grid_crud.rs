@@ -191,7 +191,7 @@ pub(crate) async fn update_grid(
         "edited",
         &format!("POST /grids/{id}/versions to save a new version, or delete the plans first"),
     )
-        .await?;
+    .await?;
 
     // PUT replaces the whole grid, obstacles included — with the `/obstacles` routes
     // gone this is the only way to edit them. Validating against the *requested*

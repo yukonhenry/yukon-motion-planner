@@ -4,27 +4,16 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
-// Eq Derive macro not supported because of f64 attribute
+// Eq Derive macro not supported because of Json attribute
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "plans")]
+#[sea_orm(table_name = "robots")]
 pub struct Model {
     #[sea_orm(primary_key)]
     #[serde(skip_deserializing)]
     pub id: i32,
-    pub grid_id: i32,
     pub name: String,
     #[sea_orm(column_type = "JsonBinary")]
-    pub vertices: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub meta: Json,
-    #[sea_orm(
-        belongs_to,
-        from = "grid_id",
-        to = "id",
-        on_update = "Cascade",
-        on_delete = "Cascade"
-    )]
-    pub grids: BelongsTo<super::grid_worlds::Entity>,
+    pub capabilities: Json, // json representation for robot capabilities during prototyping
     #[sea_orm(has_many)]
     pub plan_robots: HasMany<super::plan_robots::Entity>,
 }

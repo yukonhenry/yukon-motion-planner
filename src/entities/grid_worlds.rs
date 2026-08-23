@@ -4,7 +4,8 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+// Eq Derive macro not supported because of f64 attribute
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "grid_worlds")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -15,6 +16,7 @@ pub struct Model {
     pub height: i32,
     pub obs_polygons: Json,
     pub version: i32,
+    pub sim_interval: f64,
     #[sea_orm(has_many)]
     pub plans: HasMany<super::plans::Entity>,
 }
