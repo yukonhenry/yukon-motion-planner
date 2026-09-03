@@ -1,4 +1,4 @@
-import type {GridSize, Vertex} from './types';
+import type { GridSize, Vertex } from "./types";
 
 /**
  * Pure coordinate math — no React, no SVG, no DOM.
@@ -31,15 +31,14 @@ export const cellToPixel = (cell: number) => cell * CELL_SIZE + CELL_SIZE / 2;
 export const pixelToCell = (pixel: number) => Math.floor(pixel / CELL_SIZE);
 
 export const verticesToPixels = (vertices: Vertex[]): [number, number][] =>
-    vertices.map(([x, y]) => [cellToPixel(x), cellToPixel(y)]);
+  vertices.map(([x, y]) => [cellToPixel(x), cellToPixel(y)]);
 
-const clamp = (value: number, min: number, max: number) =>
-    Math.min(Math.max(value, min), max);
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 /** Pins a cell inside the grid, so a drag that leaves the canvas still yields a legal cell. */
 export const clampCell = (cell: Vertex, grid: GridSize): Vertex => [
-    clamp(cell[0], 0, grid.width - 1),
-    clamp(cell[1], 0, grid.height - 1),
+  clamp(cell[0], 0, grid.width - 1),
+  clamp(cell[1], 0, grid.height - 1),
 ];
 
 /**
@@ -47,11 +46,7 @@ export const clampCell = (cell: Vertex, grid: GridSize): Vertex => [
  * the far edge is out of range: a 10-wide grid addresses columns 0..=9.
  */
 export function outOfBounds(vertices: Vertex[], grid: GridSize): Vertex | null {
-    return (
-        vertices.find(
-            ([x, y]) => x < 0 || x >= grid.width || y < 0 || y >= grid.height,
-        ) ?? null
-    );
+  return vertices.find(([x, y]) => x < 0 || x >= grid.width || y < 0 || y >= grid.height) ?? null;
 }
 
 /**
@@ -62,16 +57,16 @@ export function outOfBounds(vertices: Vertex[], grid: GridSize): Vertex | null {
  * @returns an error message, or `null` when the polygon is acceptable.
  */
 export function validateVertices(vertices: Vertex[], grid: GridSize): string | null {
-    if (vertices.length < MIN_VERTICES) {
-        return `an obstacle needs at least ${MIN_VERTICES} vertices, got ${vertices.length}`;
-    }
+  if (vertices.length < MIN_VERTICES) {
+    return `an obstacle needs at least ${MIN_VERTICES} vertices, got ${vertices.length}`;
+  }
 
-    const stray = outOfBounds(vertices, grid);
-    if (stray) {
-        return `vertex [${stray[0]}, ${stray[1]}] is outside the ${grid.width}x${grid.height} grid`;
-    }
+  const stray = outOfBounds(vertices, grid);
+  if (stray) {
+    return `vertex [${stray[0]}, ${stray[1]}] is outside the ${grid.width}x${grid.height} grid`;
+  }
 
-    return null;
+  return null;
 }
 
 /**
@@ -81,27 +76,24 @@ export function validateVertices(vertices: Vertex[], grid: GridSize): string | n
  * legal at 20x15 can be stranded out of bounds at 10x10, and the server refuses the
  * whole save rather than clipping them.
  */
-export function validateObstacles(
-    polygons: Vertex[][],
-    grid: GridSize,
-): string | null {
-    for (const [index, vertices] of polygons.entries()) {
-        const problem = validateVertices(vertices, grid);
-        if (problem) return `obstacle ${index}: ${problem}`;
-    }
-    return null;
+export function validateObstacles(polygons: Vertex[][], grid: GridSize): string | null {
+  for (const [index, vertices] of polygons.entries()) {
+    const problem = validateVertices(vertices, grid);
+    if (problem) return `obstacle ${index}: ${problem}`;
+  }
+  return null;
 }
 
 /** The smallest cell-space box containing the polygon. */
 export function polygonBounds(vertices: Vertex[]) {
-    const xs = vertices.map(([x]) => x);
-    const ys = vertices.map(([, y]) => y);
-    return {
-        minX: Math.min(...xs),
-        maxX: Math.max(...xs),
-        minY: Math.min(...ys),
-        maxY: Math.max(...ys),
-    };
+  const xs = vertices.map(([x]) => x);
+  const ys = vertices.map(([, y]) => y);
+  return {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys),
+  };
 }
 
 /**
@@ -110,16 +102,16 @@ export function polygonBounds(vertices: Vertex[]) {
  * rigid — clamping per-vertex would deform it against the wall.
  */
 export function translatePolygon(
-    vertices: Vertex[],
-    dx: number,
-    dy: number,
-    grid: GridSize,
+  vertices: Vertex[],
+  dx: number,
+  dy: number,
+  grid: GridSize,
 ): Vertex[] {
-    const {minX, maxX, minY, maxY} = polygonBounds(vertices);
-    const limitedDx = clamp(dx, -minX, grid.width - 1 - maxX);
-    const limitedDy = clamp(dy, -minY, grid.height - 1 - maxY);
+  const { minX, maxX, minY, maxY } = polygonBounds(vertices);
+  const limitedDx = clamp(dx, -minX, grid.width - 1 - maxX);
+  const limitedDy = clamp(dy, -minY, grid.height - 1 - maxY);
 
-    return vertices.map(([x, y]) => [x + limitedDx, y + limitedDy]);
+  return vertices.map(([x, y]) => [x + limitedDx, y + limitedDy]);
 }
 
 /** Two cells are equal — used to avoid re-committing a drag that never moved. */
@@ -134,11 +126,11 @@ export const sameCell = (a: Vertex, b: Vertex) => a[0] === b[0] && a[1] === b[1]
  * saved before this convention can still come back open.
  */
 export const isClosedRing = (vertices: Vertex[]) =>
-    vertices.length > 1 && sameCell(vertices[0], vertices[vertices.length - 1]);
+  vertices.length > 1 && sameCell(vertices[0], vertices[vertices.length - 1]);
 
 /** Repeats the first corner at the end, unless the polygon already ends there. */
 export const closeRing = (vertices: Vertex[]): Vertex[] =>
-    vertices.length === 0 || isClosedRing(vertices) ? vertices : [...vertices, vertices[0]];
+  vertices.length === 0 || isClosedRing(vertices) ? vertices : [...vertices, vertices[0]];
 
 /**
  * Replaces one vertex, keeping the result inside the grid.
@@ -147,18 +139,16 @@ export const closeRing = (vertices: Vertex[]): Vertex[] =>
  * either handle has to move both — moving one alone tears the outline open.
  */
 export function replaceVertex(
-    vertices: Vertex[],
-    index: number,
-    cell: Vertex,
-    grid: GridSize,
+  vertices: Vertex[],
+  index: number,
+  cell: Vertex,
+  grid: GridSize,
 ): Vertex[] {
-    const next = clampCell(cell, grid);
-    const last = vertices.length - 1;
-    const paired = isClosedRing(vertices) && (index === 0 || index === last);
+  const next = clampCell(cell, grid);
+  const last = vertices.length - 1;
+  const paired = isClosedRing(vertices) && (index === 0 || index === last);
 
-    return vertices.map((v, i) =>
-        i === index || (paired && (i === 0 || i === last)) ? next : v,
-    );
+  return vertices.map((v, i) => (i === index || (paired && (i === 0 || i === last)) ? next : v));
 }
 
 /**
@@ -175,101 +165,101 @@ export function replaceVertex(
  * where the two could plausibly diverge.
  */
 export function rasterizePolygon(vertices: Vertex[], grid: GridSize): Vertex[] {
-    // Deduped by cell index: the interior and edge passes overlap, and an obstacle drawn
-    // as a closed ring walks its final degenerate edge twice.
-    const blocked = new Set<number>();
-    const mark = (x: number, y: number) => {
-        // Mirrors `try_id` — negatives included, which is why this tests x >= 0 rather
-        // than relying on the array bounds.
-        if (x >= 0 && y >= 0 && x < grid.width && y < grid.height) {
-            blocked.add(y * grid.width + x);
-        }
-    };
-
-    fillPolygonInterior(vertices, grid, mark);
-    for (let i = 0; i < vertices.length; i++) {
-        drawBresenhamEdge(vertices[i], vertices[(i + 1) % vertices.length], mark);
+  // Deduped by cell index: the interior and edge passes overlap, and an obstacle drawn
+  // as a closed ring walks its final degenerate edge twice.
+  const blocked = new Set<number>();
+  const mark = (x: number, y: number) => {
+    // Mirrors `try_id` — negatives included, which is why this tests x >= 0 rather
+    // than relying on the array bounds.
+    if (x >= 0 && y >= 0 && x < grid.width && y < grid.height) {
+      blocked.add(y * grid.width + x);
     }
+  };
 
-    return [...blocked].map((id) => [id % grid.width, Math.floor(id / grid.width)]);
+  fillPolygonInterior(vertices, grid, mark);
+  for (let i = 0; i < vertices.length; i++) {
+    drawBresenhamEdge(vertices[i], vertices[(i + 1) % vertices.length], mark);
+  }
+
+  return [...blocked].map((id) => [id % grid.width, Math.floor(id / grid.width)]);
 }
 
 /** Scanline fill of the polygon interior — boundary cells are the edge pass's job. */
 function fillPolygonInterior(
-    vertices: Vertex[],
-    grid: GridSize,
-    mark: (x: number, y: number) => void,
+  vertices: Vertex[],
+  grid: GridSize,
+  mark: (x: number, y: number) => void,
 ) {
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const [, y] of vertices) {
-        minY = Math.min(minY, y);
-        maxY = Math.max(maxY, y);
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const [, y] of vertices) {
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  minY = Math.max(minY, 0);
+  maxY = Math.min(maxY, grid.height - 1);
+
+  for (let y = minY; y <= maxY; y++) {
+    const intersections: number[] = [];
+    for (let i = 0; i < vertices.length; i++) {
+      const [x1, y1] = vertices[i];
+      const [x2, y2] = vertices[(i + 1) % vertices.length];
+
+      // Half-open in y: a vertex counts for the span below it and not the one
+      // above, which is what stops a shared corner being counted twice.
+      if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
+        // Rust's integer division truncates toward zero, so this is Math.trunc
+        // and not Math.floor — they differ on left-leaning edges, where the span
+        // starts a cell late and the edge pass covers the gap.
+        intersections.push(x1 + Math.trunc(((y - y1) * (x2 - x1)) / (y2 - y1)));
+      }
     }
-    minY = Math.max(minY, 0);
-    maxY = Math.min(maxY, grid.height - 1);
 
-    for (let y = minY; y <= maxY; y++) {
-        const intersections: number[] = [];
-        for (let i = 0; i < vertices.length; i++) {
-            const [x1, y1] = vertices[i];
-            const [x2, y2] = vertices[(i + 1) % vertices.length];
+    // Numeric, not JS's lexicographic default: [2, 10] must not sort as [10, 2].
+    intersections.sort((a, b) => a - b);
 
-            // Half-open in y: a vertex counts for the span below it and not the one
-            // above, which is what stops a shared corner being counted twice.
-            if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
-                // Rust's integer division truncates toward zero, so this is Math.trunc
-                // and not Math.floor — they differ on left-leaning edges, where the span
-                // starts a cell late and the edge pass covers the gap.
-                intersections.push(x1 + Math.trunc(((y - y1) * (x2 - x1)) / (y2 - y1)));
-            }
-        }
-
-        // Numeric, not JS's lexicographic default: [2, 10] must not sort as [10, 2].
-        intersections.sort((a, b) => a - b);
-
-        // An odd count leaves a lone trailing value that Rust's `chunks(2)` slice pattern
-        // silently drops, so this stops one short rather than filling to the grid edge.
-        for (let i = 0; i + 1 < intersections.length; i += 2) {
-            for (let x = intersections[i]; x <= intersections[i + 1]; x++) {
-                mark(x, y);
-            }
-        }
+    // An odd count leaves a lone trailing value that Rust's `chunks(2)` slice pattern
+    // silently drops, so this stops one short rather than filling to the grid edge.
+    for (let i = 0; i + 1 < intersections.length; i += 2) {
+      for (let x = intersections[i]; x <= intersections[i + 1]; x++) {
+        mark(x, y);
+      }
     }
+  }
 }
 
 function drawBresenhamEdge(
-    [x0, y0]: Vertex,
-    [x1, y1]: Vertex,
-    mark: (x: number, y: number) => void,
+  [x0, y0]: Vertex,
+  [x1, y1]: Vertex,
+  mark: (x: number, y: number) => void,
 ) {
-    const dx = Math.abs(x1 - x0);
-    const dy = Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1;
-    const sy = y0 < y1 ? 1 : -1;
-    let err = dx - dy;
-    let x = x0;
-    let y = y0;
+  const dx = Math.abs(x1 - x0);
+  const dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  let x = x0;
+  let y = y0;
 
-    for (;;) {
-        mark(x, y);
-        if (x === x1 && y === y1) break;
-        const e2 = 2 * err;
-        // Both branches can fire on the same step — that diagonal move is what keeps the
-        // stair-stepping to one cell per axis instead of cutting a corner.
-        if (e2 > -dy) {
-            err -= dy;
-            x += sx;
-        }
-        if (e2 < dx) {
-            err += dx;
-            y += sy;
-        }
+  for (;;) {
+    mark(x, y);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    // Both branches can fire on the same step — that diagonal move is what keeps the
+    // stair-stepping to one cell per axis instead of cutting a corner.
+    if (e2 > -dy) {
+      err -= dy;
+      x += sx;
     }
+    if (e2 < dx) {
+      err += dx;
+      y += sy;
+    }
+  }
 }
 
 /** Deterministic color per obstacle so shapes stay visually distinct between renders. */
 export function obstacleHue(id: number) {
-    // Golden-angle stepping spreads consecutive ids far apart on the color wheel.
-    return (id * 137.508) % 360;
+  // Golden-angle stepping spreads consecutive ids far apart on the color wheel.
+  return (id * 137.508) % 360;
 }

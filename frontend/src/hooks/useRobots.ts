@@ -1,6 +1,6 @@
-import {useCallback, useEffect, useState} from 'react';
-import * as api from '../api';
-import type {Robot, RobotInput} from '../types';
+import { useCallback, useEffect, useState } from "react";
+import * as api from "../api";
+import type { Robot, RobotInput } from "../types";
 
 /**
  * The fleet.
@@ -11,58 +11,55 @@ import type {Robot, RobotInput} from '../types';
  * computed from the world rather than from the machine that will drive it.
  */
 export function useRobots() {
-    const [robots, setRobots] = useState<Robot[]>([]);
-    const [pending, setPending] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+  const [robots, setRobots] = useState<Robot[]>([]);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-    const report = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const report = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
 
-    useEffect(() => {
-        void api
-            .listRobots()
-            .then(setRobots)
-            .catch(report);
-    }, []);
+  useEffect(() => {
+    void api.listRobots().then(setRobots).catch(report);
+  }, []);
 
-    const create = useCallback(async (input: RobotInput) => {
-        setPending(true);
-        try {
-            const saved = await api.createRobot(input);
-            setRobots((current) => [...current, saved]);
-            setError(null);
-            return saved;
-        } catch (e) {
-            report(e);
-            return null;
-        } finally {
-            setPending(false);
-        }
-    }, []);
+  const create = useCallback(async (input: RobotInput) => {
+    setPending(true);
+    try {
+      const saved = await api.createRobot(input);
+      setRobots((current) => [...current, saved]);
+      setError(null);
+      return saved;
+    } catch (e) {
+      report(e);
+      return null;
+    } finally {
+      setPending(false);
+    }
+  }, []);
 
-    const update = useCallback(async (id: number, input: RobotInput) => {
-        setPending(true);
-        try {
-            const saved = await api.updateRobot(id, input);
-            setRobots((current) => current.map((r) => (r.id === id ? saved : r)));
-            setError(null);
-            return saved;
-        } catch (e) {
-            report(e);
-            return null;
-        } finally {
-            setPending(false);
-        }
-    }, []);
+  const update = useCallback(async (id: number, input: RobotInput) => {
+    setPending(true);
+    try {
+      const saved = await api.updateRobot(id, input);
+      setRobots((current) => current.map((r) => (r.id === id ? saved : r)));
+      setError(null);
+      return saved;
+    } catch (e) {
+      report(e);
+      return null;
+    } finally {
+      setPending(false);
+    }
+  }, []);
 
-    const remove = useCallback(async (id: number) => {
-        try {
-            await api.deleteRobot(id);
-            setRobots((current) => current.filter((r) => r.id !== id));
-            setError(null);
-        } catch (e) {
-            report(e);
-        }
-    }, []);
+  const remove = useCallback(async (id: number) => {
+    try {
+      await api.deleteRobot(id);
+      setRobots((current) => current.filter((r) => r.id !== id));
+      setError(null);
+    } catch (e) {
+      report(e);
+    }
+  }, []);
 
-    return {robots, pending, error, create, update, remove};
+  return { robots, pending, error, create, update, remove };
 }

@@ -1,4 +1,4 @@
-import type { Endpoint, Plan, Robot, Vertex } from '../types';
+import type { Endpoint, Plan, Robot, Vertex } from "../types";
 
 interface Props {
   src: Vertex | null;
@@ -32,11 +32,11 @@ interface Props {
 }
 
 const ENDPOINTS: { key: Endpoint; label: string }[] = [
-  { key: 'src', label: 'Start' },
-  { key: 'dest', label: 'Goal' },
+  { key: "src", label: "Start" },
+  { key: "dest", label: "Goal" },
 ];
 
-const cellLabel = (cell: Vertex | null) => (cell ? `[${cell[0]}, ${cell[1]}]` : 'not set');
+const cellLabel = (cell: Vertex | null) => (cell ? `[${cell[0]}, ${cell[1]}]` : "not set");
 
 export function RoutePanel({
   src,
@@ -60,8 +60,7 @@ export function RoutePanel({
   const cells = { src, dest };
   // A driver is part of what a plan *is*, so it gates Generate the same way the endpoints
   // do rather than failing at the server.
-  const ready =
-    src !== null && dest !== null && driverId !== null && !blocked && !unsaved;
+  const ready = src !== null && dest !== null && driverId !== null && !blocked && !unsaved;
 
   return (
     <section className="panel">
@@ -81,14 +80,14 @@ export function RoutePanel({
               aria-pressed={picking === key}
               onClick={() => onPick(picking === key ? null : key)}
             >
-              {picking === key ? 'Picking…' : 'Set'}
+              {picking === key ? "Picking…" : "Set"}
             </button>
           </div>
         ))}
 
         {picking && (
           <p className="muted hint">
-            Click a cell to place the {picking === 'src' ? 'start' : 'goal'}.
+            Click a cell to place the {picking === "src" ? "start" : "goal"}.
           </p>
         )}
 
@@ -97,18 +96,18 @@ export function RoutePanel({
             that is wrong without looking wrong. */}
         {robots.length === 0 && (
           <p className="muted hint">
-            Add a robot first — a route is planned for a machine, and the run takes its speed
-            and cadence from it.
+            Add a robot first — a route is planned for a machine, and the run takes its speed and
+            cadence from it.
           </p>
         )}
 
         {(blocked || unsaved) && (
           <p className="muted hint">
             {unsaved
-              ? 'Create the grid before planning a route across it.'
+              ? "Create the grid before planning a route across it."
               : frozen
-                ? 'These edits aren’t saved yet. Save them as a new version to plan against them — the routes below belong to the version you started from.'
-                : 'Save your changes first — routes are planned against the saved grid.'}
+                ? "These edits aren’t saved yet. Save them as a new version to plan against them — the routes below belong to the version you started from."
+                : "Save your changes first — routes are planned against the saved grid."}
           </p>
         )}
 
@@ -118,8 +117,8 @@ export function RoutePanel({
         <label className="row">
           <span>Driver</span>
           <select
-            value={driverId ?? ''}
-            onChange={(e) => onPickDriver(e.target.value === '' ? null : Number(e.target.value))}
+            value={driverId ?? ""}
+            onChange={(e) => onPickDriver(e.target.value === "" ? null : Number(e.target.value))}
           >
             <option value="">Choose a robot…</option>
             {robots.map((robot) => (
@@ -132,7 +131,7 @@ export function RoutePanel({
 
         <div className="row">
           <button type="button" onClick={onGenerate} disabled={!ready || pending}>
-            {pending ? 'Planning…' : 'Generate route'}
+            {pending ? "Planning…" : "Generate route"}
           </button>
           <button
             type="button"
@@ -147,10 +146,10 @@ export function RoutePanel({
         {active &&
           (active.route_vertices.length > 0 ? (
             <p className="muted">
-              {active.route_vertices.length} cells,{' '}
+              {active.route_vertices.length} cells,{" "}
               <span title="Scaled by 10: an orthogonal step costs 10, a diagonal 14.">
                 cost {active.meta.cost}
-              </span>{' '}
+              </span>{" "}
               (plan #{active.id}).
             </p>
           ) : (
@@ -164,11 +163,15 @@ export function RoutePanel({
             <h3 className="panel__subhead">Saved routes ({plans.length})</h3>
             <ul className="plan-list">
               {plans.map((plan) => (
-                <li key={plan.id} className={plan.id === active?.id ? 'selected' : ''}>
-                  <button type="button" className="subtle plan-list__pick" onClick={() => onShow(plan.id)}>
-                    #{plan.id}{' '}
+                <li key={plan.id} className={plan.id === active?.id ? "selected" : ""}>
+                  <button
+                    type="button"
+                    className="subtle plan-list__pick"
+                    onClick={() => onShow(plan.id)}
+                  >
+                    #{plan.id}{" "}
                     <span className="muted">
-                      [{plan.src_vertex.join(', ')}] → [{plan.dest_vertex.join(', ')}]
+                      [{plan.src_vertex.join(", ")}] → [{plan.dest_vertex.join(", ")}]
                     </span>
                   </button>
                   <button
@@ -183,9 +186,7 @@ export function RoutePanel({
                 </li>
               ))}
             </ul>
-            <p className="muted hint">
-              Deleting every route unfreezes this grid for editing.
-            </p>
+            <p className="muted hint">Deleting every route unfreezes this grid for editing.</p>
           </>
         )}
       </div>

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import * as api from '../api';
-import type { Grid, GridDetail, GridInput } from '../types';
+import { useCallback, useEffect, useState } from "react";
+import * as api from "../api";
+import type { Grid, GridDetail, GridInput } from "../types";
 
 /**
  * The saved grids, and the three ways to write one.
@@ -62,5 +62,15 @@ export function useGrids() {
     setGrids((current) => current.filter((g) => g.id !== gridId));
   }, []);
 
-  return { grids, loading, error, setError, refresh, create, update, createVersion, remove };
+  return {
+    grids,
+    loading,
+    error,
+    setError,
+    refresh,
+    create,
+    update,
+    createVersion,
+    remove,
+  };
 }

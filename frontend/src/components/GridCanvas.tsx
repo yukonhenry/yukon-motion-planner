@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from "react";
 import {
   CELL_SIZE,
   cellToPixel,
@@ -13,8 +13,8 @@ import {
   sameCell,
   translatePolygon,
   verticesToPixels,
-} from '../geometry';
-import type { Endpoint, GridSize, Obstacle, Vertex } from '../types';
+} from "../geometry";
+import type { Endpoint, GridSize, Obstacle, Vertex } from "../types";
 
 /**
  * The only module in the app that knows SVG exists.
@@ -59,8 +59,14 @@ interface Props {
 
 /** An in-flight drag. Held in state, but it only changes when the *cell* changes. */
 type Drag =
-  | { kind: 'vertex'; obstacleId: number; index: number; vertices: Vertex[] }
-  | { kind: 'move'; obstacleId: number; origin: Vertex; from: Vertex[]; vertices: Vertex[] };
+  | { kind: "vertex"; obstacleId: number; index: number; vertices: Vertex[] }
+  | {
+      kind: "move";
+      obstacleId: number;
+      origin: Vertex;
+      from: Vertex[];
+      vertices: Vertex[];
+    };
 
 /**
  * A run of cells as one <path> of square subpaths, for the same reason gridPath is one
@@ -69,16 +75,13 @@ type Drag =
  */
 const cellsToPath = (cells: Vertex[]) =>
   cells
-    .map(
-      ([x, y]) =>
-        `M${x * CELL_SIZE} ${y * CELL_SIZE}h${CELL_SIZE}v${CELL_SIZE}h${-CELL_SIZE}z`,
-    )
-    .join('');
+    .map(([x, y]) => `M${x * CELL_SIZE} ${y * CELL_SIZE}h${CELL_SIZE}v${CELL_SIZE}h${-CELL_SIZE}z`)
+    .join("");
 
 const toPoints = (vertices: Vertex[]) =>
   verticesToPixels(vertices)
     .map(([x, y]) => `${x},${y}`)
-    .join(' ');
+    .join(" ");
 
 export function GridCanvas({
   grid,
@@ -116,15 +119,12 @@ export function GridCanvas({
     for (let y = 0; y <= grid.height; y++) {
       segments.push(`M0 ${y * CELL_SIZE}H${width}`);
     }
-    return segments.join('');
+    return segments.join("");
   }, [grid.width, grid.height, width, height]);
 
   const eventToCell = (e: React.PointerEvent | React.MouseEvent): Vertex => {
     const rect = svgRef.current!.getBoundingClientRect();
-    return clampCell(
-      [pixelToCell(e.clientX - rect.left), pixelToCell(e.clientY - rect.top)],
-      grid,
-    );
+    return clampCell([pixelToCell(e.clientX - rect.left), pixelToCell(e.clientY - rect.top)], grid);
   };
 
   /** What to draw for an obstacle: the drag preview if it's being dragged, else its stored shape. */
@@ -149,19 +149,23 @@ export function GridCanvas({
     [showFootprint, obstacles, grid, drag],
   );
 
-  const startVertexDrag =
-    (obstacle: Obstacle, index: number) => (e: React.PointerEvent) => {
-      e.stopPropagation();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      setDrag({ kind: 'vertex', obstacleId: obstacle.id, index, vertices: obstacle.vertices });
-    };
+  const startVertexDrag = (obstacle: Obstacle, index: number) => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({
+      kind: "vertex",
+      obstacleId: obstacle.id,
+      index,
+      vertices: obstacle.vertices,
+    });
+  };
 
   const startMoveDrag = (obstacle: Obstacle) => (e: React.PointerEvent) => {
     e.stopPropagation();
     onSelect(obstacle.id);
     e.currentTarget.setPointerCapture(e.pointerId);
     setDrag({
-      kind: 'move',
+      kind: "move",
       obstacleId: obstacle.id,
       origin: eventToCell(e),
       from: obstacle.vertices,
@@ -175,7 +179,7 @@ export function GridCanvas({
 
     if (!drag) return;
 
-    if (drag.kind === 'vertex') {
+    if (drag.kind === "vertex") {
       const next = replaceVertex(drag.vertices, drag.index, cell, grid);
       // Re-render only when the snapped cell actually changed.
       if (!sameCell(next[drag.index], drag.vertices[drag.index])) {
@@ -197,8 +201,7 @@ export function GridCanvas({
   const endDrag = () => {
     if (!drag) return;
     const original = obstacles.find((o) => o.id === drag.obstacleId)?.vertices;
-    const moved =
-      original && original.some((v, i) => !sameCell(v, drag.vertices[i]));
+    const moved = original && original.some((v, i) => !sameCell(v, drag.vertices[i]));
     if (moved) {
       onUpdate(drag.obstacleId, drag.vertices);
     }
@@ -231,7 +234,7 @@ export function GridCanvas({
   return (
     <svg
       ref={svgRef}
-      className={`canvas ${placing ? 'canvas--placing' : ''}`}
+      className={`canvas ${placing ? "canvas--placing" : ""}`}
       width={width}
       height={height}
       onClick={onBackgroundClick}
@@ -248,7 +251,7 @@ export function GridCanvas({
           vertices are cell centers, so rasterization claims cells the stroke only
           clips. */}
       {footprints.length > 0 && (
-        <g className="footprint" style={{ pointerEvents: 'none' }}>
+        <g className="footprint" style={{ pointerEvents: "none" }}>
           {footprints.map(({ id, d }) => (
             <path key={id} d={d} fill={`hsl(${obstacleHue(id)} 70% 55% / 0.55)`} />
           ))}
@@ -256,7 +259,7 @@ export function GridCanvas({
       )}
 
       {/* While placing a cell, shapes must not swallow the click meant for underneath. */}
-      <g style={{ pointerEvents: placing ? 'none' : undefined }}>
+      <g style={{ pointerEvents: placing ? "none" : undefined }}>
         {obstacles.map((obstacle) => {
           const vertices = shapeOf(obstacle);
           const selected = obstacle.id === selectedId;
@@ -265,7 +268,7 @@ export function GridCanvas({
             <g key={obstacle.id}>
               <polygon
                 points={toPoints(vertices)}
-                className={`obstacle ${selected ? 'obstacle--selected' : ''}`}
+                className={`obstacle ${selected ? "obstacle--selected" : ""}`}
                 style={{
                   fill: `hsl(${hue} 70% 55% / ${selected ? 0.5 : 0.32})`,
                   stroke: `hsl(${hue} 65% 45%)`,
@@ -312,12 +315,17 @@ export function GridCanvas({
         </g>
       )}
 
-      {([['src', src], ['dest', dest]] as const).map(([kind, cell]) =>
+      {(
+        [
+          ["src", src],
+          ["dest", dest],
+        ] as const
+      ).map(([kind, cell]) =>
         cell ? (
           <g key={kind} className={`endpoint-marker endpoint-marker--${kind}`}>
             <circle cx={cellToPixel(cell[0])} cy={cellToPixel(cell[1])} r={9} />
             <text x={cellToPixel(cell[0])} y={cellToPixel(cell[1])} dy="0.35em">
-              {kind === 'src' ? 'S' : 'G'}
+              {kind === "src" ? "S" : "G"}
             </text>
           </g>
         ) : null,
@@ -339,7 +347,13 @@ export function GridCanvas({
             className="draft__line"
           />
           {draft.map(([x, y], index) => (
-            <circle key={index} cx={cellToPixel(x)} cy={cellToPixel(y)} r={5} className="draft__dot" />
+            <circle
+              key={index}
+              cx={cellToPixel(x)}
+              cy={cellToPixel(y)}
+              r={5}
+              className="draft__dot"
+            />
           ))}
         </g>
       )}
