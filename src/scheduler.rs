@@ -75,7 +75,22 @@ pub(crate) enum SimEvent {
         tick: u64,
         /// How many obstacles actually moved. Zero means every draw clamped against an edge.
         moved: usize,
+        /// Obstacles that could not move: another obstacle, or the grid edge, was in the way.
+        blocked: Vec<i32>,
         obs_polygons: Vec<ObstaclePoly>,
+    },
+    /// A translating obstacle stopped rather than run the robot over.
+    ///
+    /// Its own event rather than a field on `Environment`, because it is a warning about the
+    /// machine and not a description of the scenery: a client should be able to listen for it
+    /// alone without inspecting every tick.
+    Collision {
+        /// The environment tick it happened on.
+        tick: u64,
+        /// The obstacles that stopped short. Plural: two can arrive on the same tick.
+        obstacle_ids: Vec<i32>,
+        /// Where the robot was standing when they did.
+        robot_position: [i32; 2],
     },
     /// The robot moved, and replanned from where that left it.
     Plan {
@@ -106,6 +121,7 @@ impl SimEvent {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             SimEvent::Environment { .. } => "environment",
+            SimEvent::Collision { .. } => "collision",
             SimEvent::Plan { .. } => "plan",
             SimEvent::Stopped { .. } => "stopped",
         }
@@ -406,9 +422,18 @@ async fn environment_task(
 
         // `send` failing means nobody is listening. Not a reason to stop: a run is the
         // server's, and a user closing the tab and reopening it should find it still going.
+        if !tick.robot_hits.is_empty() {
+            let _ = events.send(SimEvent::Collision {
+                tick: tick.tick,
+                obstacle_ids: tick.robot_hits.clone(),
+                robot_position: tick.robot_position,
+            });
+        }
+
         let _ = events.send(SimEvent::Environment {
             tick: tick.tick,
             moved: tick.moved,
+            blocked: tick.blocked,
             obs_polygons: tick.obstacles,
         });
     }
@@ -442,7 +467,10 @@ async fn robot_task(
         // the one the route below was planned from.
         let (moved, position, arrived, obstacles, env_tick, width, height) = {
             let mut world = world.lock().expect("sim world poisoned");
-            let moved = world.robot_mut().advance(max_velocity);
+            // The route was planned against the world at the last replan; obstacles have had
+            // ticks of their own since, so the robot re-checks each cell as it steps rather
+            // than trusting a plan the world has moved on from.
+            let moved = world.step_robot(max_velocity);
             let (position, arrived) = world.robot_at();
             let (obstacles, env_tick) = world.snapshot();
             (moved, position, arrived, obstacles, env_tick, world.width, world.height)
@@ -480,7 +508,7 @@ async fn robot_task(
                 // rather than one computed from a cell it has already left.
                 {
                     let mut world = world.lock().expect("sim world poisoned");
-                    world.robot_mut().follow(route.vertices.clone());
+                    world.follow_route(route.vertices.clone());
                 }
                 let _ = events.send(SimEvent::Plan {
                     tick,
@@ -518,6 +546,7 @@ mod tests {
         ObstaclePoly {
             id: 1,
             dynamic,
+            velocity: [0, 0],
             vertices: vec![
                 CellVertex { x: 3, y: 3 },
                 CellVertex { x: 6, y: 3 },
@@ -643,6 +672,7 @@ mod tests {
             match event {
                 SimEvent::Environment { .. } => env += 1,
                 SimEvent::Plan { .. } => plans += 1,
+                SimEvent::Collision { .. } => {}
                 SimEvent::Stopped { .. } => break,
             }
         }

@@ -102,6 +102,22 @@ export function SimPanel({
             <p className="muted">
               Robot at [{run.robotPosition.join(", ")}] · {run.robotMoved} cells last move
             </p>
+            {run.blocked.length > 0 && (
+              <p className="muted">
+                Held up: obstacle{run.blocked.length > 1 ? "s" : ""} {run.blocked.join(", ")}
+              </p>
+            )}
+            {/* A warning rather than an error: the run continues, and the obstacle simply
+                declined to drive over the machine. It stays on screen after the fact because
+                the moment itself is one tick long and easy to miss. */}
+            {run.collision && (
+              <p className="muted collision-warning">
+                <strong>Collision avoided</strong> · obstacle
+                {run.collision.obstacleIds.length > 1 ? "s" : ""}{" "}
+                {run.collision.obstacleIds.join(", ")} stopped at the robot on tick{" "}
+                {run.collision.tick}, at [{run.collision.at.join(", ")}]
+              </p>
+            )}
             <p className="muted">
               {run.route === null ? (
                 "Waiting for the robot to move…"

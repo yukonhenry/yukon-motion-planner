@@ -23,15 +23,16 @@ export interface Draft {
  * What actually distinguishes two saves.
  *
  * `id` is excluded — it identifies a shape rather than describing it, so renumbering is not
- * an edit. `dynamic` is included: toggling it is a change the user expects to be able to
- * save, and leaving it out would leave the Revert button greyed out over a real difference.
+ * an edit. `dynamic` and `velocity` are included: changing either is something the user
+ * expects to be able to save, and leaving them out would leave the Revert button greyed out
+ * over a real difference.
  */
 const signature = (draft: Draft) =>
   JSON.stringify([
     draft.name,
     draft.width,
     draft.height,
-    draft.obstacles.map((o) => [o.vertices, o.dynamic]),
+    draft.obstacles.map((o) => [o.vertices, o.dynamic, o.velocity]),
   ]);
 
 /**
@@ -43,13 +44,17 @@ const signature = (draft: Draft) =>
 export const toWire = (obstacle: Obstacle): WireObstacle => ({
   id: obstacle.id,
   dynamic: obstacle.dynamic,
+  velocity: obstacle.velocity,
   vertices: obstacle.vertices.map(([x, y]) => ({ x, y })),
 });
 
-/** The inverse. Ids and `dynamic` come from the server unchanged. */
+/** The inverse. Ids, `dynamic` and `velocity` come from the server unchanged. */
 export const fromWire = (polygon: WireObstacle): Obstacle => ({
   id: polygon.id,
   dynamic: polygon.dynamic,
+  // Worlds stored before this field existed come back without it, so a missing velocity has
+  // to read as stationary rather than as undefined.
+  velocity: polygon.velocity ?? [0, 0],
   vertices: polygon.vertices.map(({ x, y }): Vertex => [x, y]),
 });
 
@@ -161,10 +166,12 @@ export function useGridDraft(gridId: number | null) {
         ...d,
         obstacles: [
           ...d.obstacles,
-          // Drawn as scenery: a new shape is static until the user says otherwise.
+          // Drawn as scenery: a new shape is static and stationary until the user says
+          // otherwise.
           {
             id: nextId.current++,
             dynamic: false,
+            velocity: [0, 0],
             vertices: closeRing(vertices),
           },
         ],
@@ -177,6 +184,22 @@ export function useGridDraft(gridId: number | null) {
       edit((d) => ({
         ...d,
         obstacles: d.obstacles.map((o) => (o.id === id ? { ...o, dynamic } : o)),
+      })),
+    [edit],
+  );
+
+  /**
+   * Sets how far an obstacle travels per tick.
+   *
+   * Kept separate from `setObstacleDynamic` because the two answer different questions —
+   * whether a shape may move at all, and where it goes if it does. A velocity on a static
+   * obstacle is stored but inert, so the flag stays the master switch.
+   */
+  const setObstacleVelocity = useCallback(
+    (id: number, velocity: Vertex) =>
+      edit((d) => ({
+        ...d,
+        obstacles: d.obstacles.map((o) => (o.id === id ? { ...o, velocity } : o)),
       })),
     [edit],
   );
@@ -228,6 +251,7 @@ export function useGridDraft(gridId: number | null) {
     addObstacle,
     updateObstacle,
     setObstacleDynamic,
+    setObstacleVelocity,
     removeObstacle,
     rename,
     resize,

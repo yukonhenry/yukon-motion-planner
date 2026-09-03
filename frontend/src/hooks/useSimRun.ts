@@ -25,6 +25,15 @@ export interface SimRun {
   robotPosition: Vertex;
   /** How many cells it covered on the last move. */
   robotMoved: number;
+  /**
+   * The most recent obstacle-into-robot collision, or `null` if there has not been one.
+   *
+   * Kept rather than counted, because the useful thing to show is *which* shape drove at the
+   * machine and when — a tally would say something happened without saying what.
+   */
+  collision: { tick: number; obstacleIds: number[]; at: Vertex } | null;
+  /** Ids of obstacles that could not move on the last environment tick. */
+  blocked: number[];
   /** Where the obstacles are now. */
   obstacles: Obstacle[];
   envTick: number;
@@ -94,6 +103,16 @@ export function useSimRun(gridId: number | null) {
                 obstacles: event.obs_polygons.map(fromWire),
                 envTick: event.tick,
                 moved: event.moved,
+                blocked: event.blocked,
+              };
+            case "collision":
+              return {
+                ...current,
+                collision: {
+                  tick: event.tick,
+                  obstacleIds: event.obstacle_ids,
+                  at: event.robot_position,
+                },
               };
             case "plan":
               return {
@@ -117,6 +136,7 @@ export function useSimRun(gridId: number | null) {
       };
 
       stream.addEventListener("environment", onEvent as EventListener);
+      stream.addEventListener("collision", onEvent as EventListener);
       stream.addEventListener("plan", onEvent as EventListener);
       stream.addEventListener("stopped", onEvent as EventListener);
 
@@ -143,6 +163,8 @@ export function useSimRun(gridId: number | null) {
       robotId: status.robot_id,
       robotPosition: status.robot_position,
       robotMoved: 0,
+      collision: null,
+      blocked: [],
       obstacles: status.obs_polygons.map(fromWire),
       envTick: status.env_tick,
       moved: 0,

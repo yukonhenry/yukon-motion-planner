@@ -233,6 +233,39 @@ pub(crate) fn out_of_bounds(vertices: &[CellVertex], width: i32, height: i32) ->
         .find(|v| !(0..width).contains(&v.x) || !(0..height).contains(&v.y))
 }
 
+/// Validates a velocity against the grid.
+///
+/// The bound is exact rather than arbitrary. A translation is refused whole when any corner
+/// would leave the grid, so a component at least as large as the grid is in that direction can
+/// never be taken: from the leftmost legal column, `0 + dx` is already past the right edge, and
+/// from the rightmost, `(width - 1) - dx` is already past the left. Such an obstacle would sit
+/// still forever while reporting itself blocked on every tick — a setting that looks like
+/// motion and produces none, which is worth refusing at the form level.
+///
+/// Anything smaller is allowed even if it happens to be blocked from where the obstacle
+/// currently stands: that is a fact about this moment, not about the setting, and the way may
+/// well clear.
+fn unusable_velocity([dx, dy]: [i32; 2], width: i32, height: i32) -> Option<String> {
+    // Stationary is the default and the original behavior — a dynamic obstacle with no
+    // velocity jitters a corner — so it is never unusable, whatever the grid measures.
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    if dx != 0 && dx.unsigned_abs() >= width.max(0).unsigned_abs() {
+        return Some(format!(
+            "has x velocity {dx}, which is not smaller than the grid width {width} — \
+             it could never move"
+        ));
+    }
+    if dy != 0 && dy.unsigned_abs() >= height.max(0).unsigned_abs() {
+        return Some(format!(
+            "has y velocity {dy}, which is not smaller than the grid height {height} — \
+             it could never move"
+        ));
+    }
+    None
+}
+
 // Every polygon needs three corners, all of them on the grid, and an id no sibling shares.
 //
 // Obstacles arrive with the grid rather than through routes of their own, so this is
@@ -256,6 +289,10 @@ pub(crate) fn validate_polygons(
                 "obstacle {index} has vertex [{}, {}] outside the {width}x{height} grid",
                 vertex.x, vertex.y,
             )));
+        }
+
+        if let Some(problem) = unusable_velocity(obstacle.velocity, width, height) {
+            return Err(AppError::Invalid(format!("obstacle {index} {problem}")));
         }
 
         // Detect a shared id by scanning the earlier obstacles for one with the same id. The

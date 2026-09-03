@@ -23,6 +23,8 @@ export interface WireVertex {
 export interface WireObstacle {
   id: number;
   dynamic: boolean;
+  /** Cells translated per tick, `[dx, dy]`. `[0, 0]` keeps the original random jitter. */
+  velocity: Vertex;
   vertices: WireVertex[];
 }
 
@@ -86,6 +88,18 @@ export interface Obstacle {
    * Whether a simulation may move or reshape this obstacle. Fixed environment is `false`.
    */
   dynamic: boolean;
+  /**
+   * Cells travelled per tick, `[dx, dy]`.
+   *
+   * `[0, 0]` — the default — keeps the original behavior: a dynamic obstacle with no velocity
+   * jitters one corner at random rather than travelling. Whole cells, because obstacles
+   * round-trip through the API every tick and a fractional speed would need its unspent
+   * remainder carried on the wire too.
+   *
+   * A translation that would overlap another obstacle, run over the robot, or leave the grid
+   * is refused for that tick and retried on the next one; nothing latches.
+   */
+  velocity: Vertex;
   vertices: Vertex[];
 }
 
@@ -110,6 +124,8 @@ export interface ReplanInput {
 export interface ReplanResult {
   /** The obstacles after the tick — draw these, and send them on to the next one. */
   obs_polygons: WireObstacle[];
+  /** Ids of obstacles whose translation was refused: something, or the grid edge, was there. */
+  blocked: number[];
   /** The recomputed route, empty when the goal has been walled off. */
   vertices: Vertex[];
   reachable: boolean;
@@ -246,7 +262,21 @@ export type SimEvent =
       tick: number;
       /** How many obstacles moved; 0 means every draw clamped against an edge. */
       moved: number;
+      /** Ids of obstacles that could not move: another obstacle, or the grid edge, was there. */
+      blocked: number[];
       obs_polygons: WireObstacle[];
+    }
+  | {
+      /**
+       * A translating obstacle stopped rather than run the robot over.
+       *
+       * Its own event rather than a field on `environment`, because it is a warning about the
+       * machine and not a description of the scenery — a client can listen for it alone.
+       */
+      type: "collision";
+      tick: number;
+      obstacle_ids: number[];
+      robot_position: Vertex;
     }
   | {
       type: "plan";

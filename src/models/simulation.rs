@@ -12,7 +12,7 @@
 
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
-use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
+use crate::models::obstacle::{ObstaclePoly, advance_one_tick, footprint};
 use crate::models::robot::RobotBody;
 use crate::models::planners::{PlanError, PlannerKind};
 use crate::models::rng::Xorshift;
@@ -62,9 +62,28 @@ impl SimWorld {
         }
     }
 
-    /// The robot, for a task that is about to move it.
-    pub(crate) fn robot_mut(&mut self) -> &mut RobotBody {
-        &mut self.robot
+    /// Replaces the robot's route after a replan. It does not move; it just knows more.
+    pub(crate) fn follow_route(&mut self, route: Vec<(usize, usize)>) {
+        self.robot.follow(route);
+    }
+
+    /// Walks the robot along its route, stopping short of anything now in the way.
+    ///
+    /// The obstacle check lives here rather than in the caller because this is the one place
+    /// that holds both the robot and the world it is crossing — and the cells it tests are
+    /// rasterized by [`footprint`], the same fill the planner blocks on, so the robot can
+    /// never stop at a cell the planner would have routed it through.
+    pub(crate) fn step_robot(&mut self, max_velocity: f64) -> usize {
+        let (width, height) = (self.width, self.height);
+        let occupied: std::collections::HashSet<(usize, usize)> = self
+            .obstacles
+            .iter()
+            .flat_map(|o| footprint(o, width, height))
+            .collect();
+
+        self.robot.advance(max_velocity, |[x, y]| {
+            x >= 0 && y >= 0 && occupied.contains(&(x as usize, y as usize))
+        })
     }
 
     /// Where the robot is standing, and whether that is its goal.
@@ -82,11 +101,21 @@ impl SimWorld {
     /// The tick counter advances whether or not anything moved, because it counts *time*, not
     /// change — a tick in which every draw clamped against a wall still happened.
     pub(crate) fn advance(&mut self) -> EnvironmentTick {
-        let moved = advance_one_tick(&mut self.obstacles, &mut self.rng, self.width, self.height);
+        // The robot's cell is passed in so a translating obstacle refuses to drive over it.
+        let report = advance_one_tick(
+            &mut self.obstacles,
+            &mut self.rng,
+            self.width,
+            self.height,
+            Some(self.robot.position),
+        );
         self.env_tick += 1;
         EnvironmentTick {
             tick: self.env_tick,
-            moved,
+            moved: report.moved,
+            blocked: report.blocked,
+            robot_hits: report.robot_hits,
+            robot_position: self.robot.position,
             obstacles: self.obstacles.clone(),
         }
     }
@@ -119,6 +148,12 @@ impl SimWorld {
 pub(crate) struct EnvironmentTick {
     pub(crate) tick: u64,
     pub(crate) moved: usize,
+    /// Obstacles that could not move: something was in the way, or the grid edge was.
+    pub(crate) blocked: Vec<i32>,
+    /// Obstacles that stopped short of running the robot over.
+    pub(crate) robot_hits: Vec<i32>,
+    /// Where the robot was standing during this tick.
+    pub(crate) robot_position: [i32; 2],
     pub(crate) obstacles: Vec<ObstaclePoly>,
 }
 
@@ -183,6 +218,7 @@ mod tests {
         ObstaclePoly {
             id,
             dynamic,
+            velocity: [0, 0],
             vertices: vec![
                 CellVertex { x: 3, y: 3 },
                 CellVertex { x: 6, y: 3 },
@@ -239,6 +275,7 @@ mod tests {
         let wall = ObstaclePoly {
             id: 1,
             dynamic: false,
+            velocity: [0, 0],
             vertices: vec![
                 CellVertex { x: 0, y: 4 },
                 CellVertex { x: 9, y: 4 },

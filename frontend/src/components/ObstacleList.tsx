@@ -1,5 +1,5 @@
 import { obstacleHue } from "../geometry";
-import type { Obstacle } from "../types";
+import type { Obstacle, Vertex } from "../types";
 
 interface Props {
   obstacles: Obstacle[];
@@ -8,6 +8,8 @@ interface Props {
   onDelete: (id: number) => void;
   /** Marks a shape as one a simulation may move or reshape. */
   onSetDynamic: (id: number, dynamic: boolean) => void;
+  /** Sets how many cells a shape travels per tick, as `[dx, dy]`. */
+  onSetVelocity: (id: number, velocity: Vertex) => void;
   /** Frozen grids are read-only until an edit forks a version, this flag included. */
   readOnly: boolean;
 }
@@ -18,6 +20,7 @@ export function ObstacleList({
   onSelect,
   onDelete,
   onSetDynamic,
+  onSetVelocity,
   readOnly,
 }: Props) {
   return (
@@ -60,6 +63,51 @@ export function ObstacleList({
                 />
                 dynamic
               </label>
+              {/* Only meaningful once the shape may move, and hidden otherwise so a static
+                  obstacle's row stays as short as it was. On its own line rather than beside
+                  the name: two number boxes on a sidebar row leave nothing legible.
+
+                  `[0, 0]` is not "no motion" but "the original behavior" — a dynamic obstacle
+                  with no velocity jitters one corner at random rather than travelling — which
+                  the hint says out loud, because an empty pair of boxes otherwise reads as
+                  "stationary". */}
+              {obstacle.dynamic && (
+                <div
+                  className="obstacle-list__velocity"
+                  title="Cells travelled per tick. 0, 0 jitters a random corner instead."
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <label>
+                    <span>x</span>
+                    <input
+                      type="number"
+                      value={obstacle.velocity[0]}
+                      disabled={readOnly}
+                      onChange={(e) =>
+                        onSetVelocity(obstacle.id, [
+                          Math.trunc(Number(e.target.value) || 0),
+                          obstacle.velocity[1],
+                        ])
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>y</span>
+                    <input
+                      type="number"
+                      value={obstacle.velocity[1]}
+                      disabled={readOnly}
+                      onChange={(e) =>
+                        onSetVelocity(obstacle.id, [
+                          obstacle.velocity[0],
+                          Math.trunc(Number(e.target.value) || 0),
+                        ])
+                      }
+                    />
+                  </label>
+                  <span className="obstacle-list__velocity-hint">cells/tick</span>
+                </div>
+              )}
               <button
                 type="button"
                 className="danger subtle"
@@ -73,6 +121,16 @@ export function ObstacleList({
             </li>
           ))}
         </ul>
+      )}
+
+      {/* Said once for the panel rather than on every row: a per-row note would change each
+          row's width with the value it describes, and identical controls that sit in
+          different places are harder to read than one line of explanation. */}
+      {obstacles.some((o) => o.dynamic && o.velocity[0] === 0 && o.velocity[1] === 0) && (
+        <p className="muted hint">
+          A dynamic obstacle with velocity 0, 0 jitters one random corner each tick instead of
+          travelling.
+        </p>
       )}
     </section>
   );

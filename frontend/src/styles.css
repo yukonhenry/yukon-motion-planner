@@ -336,6 +336,9 @@ button.subtle {
 
 .obstacle-list li {
   display: flex;
+  /* The velocity controls take a whole line of their own. Without wrapping they would be
+     crushed into the first row instead, overlapping the name and the vertex count. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
@@ -445,4 +448,50 @@ button.subtle {
   fill: #f9d423;
   stroke: #1b1b1b;
   stroke-width: 2;
+}
+
+/* Its own line under the name, so the two number boxes never compete with the vertex count
+   for width on a narrow sidebar.
+
+   Wrapping here as well: the trailing hint changes length with the value it describes, and
+   without somewhere to overflow to it would shrink the controls instead — leaving rows with
+   different velocities visibly different geometry. */
+.obstacle-list__velocity {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: default;
+}
+
+/* Fixed size, so a row's controls sit in the same place whatever the hint beside them says. */
+.obstacle-list__velocity label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.obstacle-list__velocity input {
+  width: 3.4rem;
+  flex: 0 0 auto;
+}
+
+/* Sits directly after the y box — it labels those two inputs, so pushing it to the right
+   edge would read as a separate column rather than as their unit.
+
+   Still the only part allowed to give: it shrinks, and wraps to its own line, before the
+   controls move at all. */
+.obstacle-list__velocity-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* A warning, not an error: the run is still going and the obstacle simply stopped. */
+.collision-warning {
+  border-left: 3px solid #f9d423;
+  padding-left: 0.5rem;
 }

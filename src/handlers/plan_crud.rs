@@ -223,6 +223,9 @@ pub(crate) struct ReplanOutput {
     /// How many obstacles actually moved. Zero means the tick was a no-op — every obstacle is
     /// static, or every draw clamped against an edge — so the route is unchanged by construction.
     moved: usize,
+    /// Obstacles whose translation was refused: another obstacle, or the grid edge, was in the
+    /// way. Ids, so a client can point at the shape that is stuck.
+    blocked: Vec<i32>,
     /// Pass as `seed` on the next tick to continue this run. See [`ReplanInput::seed`] for why
     /// this is 32 bits wide.
     next_seed: u32,
@@ -248,7 +251,9 @@ pub(crate) async fn replan_grid(
     validate_polygons(&obstacles, grid.width, grid.height)?;
 
     let mut rng = Xorshift::new(payload.seed.map_or_else(seed_from_clock, u64::from));
-    let moved = advance_one_tick(&mut obstacles, &mut rng, grid.width, grid.height);
+    // No robot on this path: a manual tick is the browser driving the world by hand, with
+    // nothing crossing it. Only a scheduled run has a machine to run over.
+    let report = advance_one_tick(&mut obstacles, &mut rng, grid.width, grid.height, None);
 
     // Replan against the new geometry. The route is computed from the obstacles the caller
     // just sent, not the stored row, so a run can explore a moving world without freezing the
@@ -268,7 +273,8 @@ pub(crate) async fn replan_grid(
         vertices: route.vertices,
         reachable: route.reachable,
         cost: route.cost,
-        moved,
+        moved: report.moved,
+        blocked: report.blocked,
         // The high half: xorshift's low bits are the weaker ones, so truncating from the top
         // gives a better next seed than masking off the bottom would.
         next_seed: (rng.next_u64() >> 32) as u32,

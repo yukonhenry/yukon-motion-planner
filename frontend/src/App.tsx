@@ -91,6 +91,7 @@ export default function App() {
     addObstacle,
     updateObstacle,
     setObstacleDynamic,
+    setObstacleVelocity,
     removeObstacle,
     ...draftState
   } = useGridDraft(gridId);
@@ -544,6 +545,7 @@ export default function App() {
               if (id === selectedId) setSelectedId(null);
             }}
             onSetDynamic={setObstacleDynamic}
+            onSetVelocity={setObstacleVelocity}
             readOnly={frozen || sim !== null || live.run !== null}
           />
         )}

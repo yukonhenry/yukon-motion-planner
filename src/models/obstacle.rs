@@ -14,7 +14,9 @@
 //! ids or motion, which is what keeps this change out of
 //! [`grid_world_manager`](crate::models::grid_world_manager).
 
+use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::rng::Xorshift;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 /// One vertex, as a pair of cell indices.
@@ -51,6 +53,17 @@ pub(crate) struct ObstaclePoly {
     /// wire format match the meaning at no cost.
     #[serde(default)]
     pub dynamic: bool,
+    /// Cells translated per tick, as `[dx, dy]`. `[0, 0]` — the default, and what every
+    /// obstacle stored before this field existed reads as — keeps the original behavior:
+    /// a dynamic obstacle with no velocity jitters one corner at random.
+    ///
+    /// Whole cells rather than a rate. Obstacles round-trip through JSON on the manual
+    /// `POST /grids/{id}/replan` path every tick, so a fractional velocity would need its
+    /// unspent remainder carried on the wire as well — otherwise the stepped and scheduled
+    /// simulations would disagree about where a slow obstacle had got to, which is exactly
+    /// the divergence [`crate::models::simulation::plan_route`] exists to prevent.
+    #[serde(default)]
+    pub velocity: [i32; 2],
     pub vertices: Vec<CellVertex>,
 }
 
@@ -95,6 +108,24 @@ impl ObstaclePoly {
         } else {
             self.vertices.len()
         }
+    }
+
+    /// This obstacle shifted by `(dx, dy)`, or `None` if that would put any corner off-grid.
+    ///
+    /// All-or-nothing because a translation is rigid: clamping the corners that would leave
+    /// the grid while letting the rest travel would silently reshape the obstacle into
+    /// something the user never drew.
+    pub(crate) fn translated(&self, dx: i32, dy: i32, width: i32, height: i32) -> Option<Self> {
+        let mut moved = self.clone();
+        for vertex in &mut moved.vertices {
+            let x = vertex.x + dx;
+            let y = vertex.y + dy;
+            if !(0..width).contains(&x) || !(0..height).contains(&y) {
+                return None;
+            }
+            *vertex = CellVertex { x, y };
+        }
+        Some(moved)
     }
 
     /// Moves one randomly chosen corner one cell in one of eight directions, clamped to the
@@ -151,19 +182,121 @@ impl ObstaclePoly {
 /// Static obstacles are left exactly as they are — that is the whole meaning of the flag — so
 /// the returned count is also the answer to "did this tick change the world at all", which is
 /// what tells a caller whether a replan has anything to do.
+/// What one environment tick did to the obstacles.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct MotionReport {
+    /// How many obstacles actually changed shape or position.
+    pub moved: usize,
+    /// Obstacles whose move was refused because it would have overlapped another obstacle or
+    /// left the grid. Ids, so a client can point at the shape that is stuck.
+    pub blocked: Vec<i32>,
+    /// Obstacles whose move was refused because it would have run over the robot.
+    ///
+    /// Separate from [`blocked`](Self::blocked) because it means something different to a
+    /// user: two obstacles jostling is scenery, a machine being driven at is a warning.
+    pub robot_hits: Vec<i32>,
+}
+
+/// Every cell one obstacle covers, boundary included.
+///
+/// Rasterized by [`GridWorldManager`] rather than by a polygon test of its own, and that is
+/// the whole design: this is the *same* fill the planner uses to decide which cells are
+/// blocked, so "these two obstacles overlap" and "the robot cannot stand there" are one
+/// predicate rather than two that might disagree. Concave shapes come free with it — the fill
+/// is even-odd scanline plus a Bresenham edge pass, which has no convexity assumption.
+pub(crate) fn footprint(
+    obstacle: &ObstaclePoly,
+    width: i32,
+    height: i32,
+) -> HashSet<(usize, usize)> {
+    let mut grid = GridWorldManager::<bool>::new(width.max(0) as usize, height.max(0) as usize);
+    grid.rasterize_polygon(&obstacle.cells(), |cell| *cell = true);
+    grid.iter()
+        .filter(|(_, covered)| **covered)
+        .map(|(id, _)| grid.xy(id))
+        .collect()
+}
+
+/// Advances every dynamic obstacle one tick, refusing any move that would collide.
+///
+/// Obstacles are considered in the order they arrive, each tested against the *committed*
+/// state of the others — so an obstacle that has already moved this tick is checked at its new
+/// position, and one that has not is checked where it still stands. That makes the outcome a
+/// function of the list order rather than of iteration luck, and the list order is the
+/// client's, which is stable across a run.
+///
+/// A refused move is simply not taken: the obstacle stays exactly where it was for this tick
+/// and tries again on the next one. Nothing is latched, so two obstacles that drift apart
+/// resume moving without anything having to clear a flag.
+///
+/// `robot` is where the machine is standing, or `None` on the manual replan path, which has no
+/// robot to run over.
 pub(crate) fn advance_one_tick(
     obstacles: &mut [ObstaclePoly],
     rng: &mut Xorshift,
     width: i32,
     height: i32,
-) -> usize {
-    let mut moved = 0;
-    for obstacle in obstacles.iter_mut().filter(|o| o.dynamic) {
-        if obstacle.jitter_one_vertex(rng, width, height) {
-            moved += 1;
+    robot: Option<[i32; 2]>,
+) -> MotionReport {
+    let mut report = MotionReport::default();
+
+    // Built once and patched as obstacles commit, rather than rebuilt per candidate: only the
+    // shape that just moved can have changed.
+    let mut footprints: Vec<HashSet<(usize, usize)>> = obstacles
+        .iter()
+        .map(|o| footprint(o, width, height))
+        .collect();
+
+    for index in 0..obstacles.len() {
+        if !obstacles[index].dynamic {
+            continue;
         }
+
+        let [dx, dy] = obstacles[index].velocity;
+        if dx == 0 && dy == 0 {
+            // No velocity means the original behavior: deform rather than translate. Jitter
+            // is unchecked against collisions on purpose — it is a statement about
+            // *uncertainty* in an obstacle's extent, not about it driving somewhere.
+            if obstacles[index].jitter_one_vertex(rng, width, height) {
+                report.moved += 1;
+                footprints[index] = footprint(&obstacles[index], width, height);
+            }
+            continue;
+        }
+
+        let Some(candidate) = obstacles[index].translated(dx, dy, width, height) else {
+            // Off the grid. Rejected whole rather than clamped per vertex, which would
+            // deform a shape that is supposed to be rigid — a wall blocks like anything else.
+            report.blocked.push(obstacles[index].id);
+            continue;
+        };
+
+        let cells = footprint(&candidate, width, height);
+
+        if let Some([rx, ry]) = robot
+            && rx >= 0
+            && ry >= 0
+            && cells.contains(&(rx as usize, ry as usize))
+        {
+            report.robot_hits.push(obstacles[index].id);
+            continue;
+        }
+
+        let hits_obstacle = footprints
+            .iter()
+            .enumerate()
+            .any(|(other, occupied)| other != index && !occupied.is_disjoint(&cells));
+        if hits_obstacle {
+            report.blocked.push(obstacles[index].id);
+            continue;
+        }
+
+        obstacles[index] = candidate;
+        footprints[index] = cells;
+        report.moved += 1;
     }
-    moved
+
+    report
 }
 
 #[cfg(test)]
@@ -177,18 +310,36 @@ mod tests {
         let json = serde_json::json!({
             "id": 7,
             "dynamic": true,
+            "velocity": [1, -2],
             "vertices": [{"x": 4, "y": 8}, {"x": 5, "y": 11}, {"x": 17, "y": 6}],
         });
 
         let parsed: ObstaclePoly = serde_json::from_value(json.clone()).expect("valid shape");
         assert_eq!(parsed.id, 7);
         assert!(parsed.dynamic);
+        assert_eq!(parsed.velocity, [1, -2]);
         assert_eq!(parsed.cells(), vec![[4, 8], [5, 11], [17, 6]]);
         assert_eq!(
             serde_json::to_value(&parsed).unwrap(),
             json,
             "not symmetric"
         );
+    }
+
+    #[test]
+    fn an_obstacle_stored_before_velocity_existed_reads_as_stationary() {
+        // Every `grid_world_states` row written before this field predates it, and a plan's
+        // world is read back through this type. Defaulting to `[0, 0]` is what lets those
+        // rows keep their original meaning — dynamic, and jittering — rather than failing to
+        // parse or silently acquiring a direction nobody chose.
+        let json = serde_json::json!({
+            "id": 3,
+            "dynamic": true,
+            "vertices": [{"x": 0, "y": 0}, {"x": 2, "y": 0}, {"x": 2, "y": 2}],
+        });
+
+        let parsed: ObstaclePoly = serde_json::from_value(json).expect("valid shape");
+        assert_eq!(parsed.velocity, [0, 0]);
     }
 
     #[test]
@@ -214,6 +365,143 @@ mod tests {
         assert!(result.is_err(), "a vertex without `y` is not a vertex");
     }
 
+    // --- translation and collision ----------------------------------------
+
+    /// A closed rectangle from `(x, y)` to `(x + w, y + h)`, travelling at `velocity`.
+    fn box_at(id: i32, x: i32, y: i32, w: i32, h: i32, velocity: [i32; 2]) -> ObstaclePoly {
+        ObstaclePoly {
+            id,
+            dynamic: true,
+            velocity,
+            vertices: vec![
+                CellVertex { x, y },
+                CellVertex { x: x + w, y },
+                CellVertex { x: x + w, y: y + h },
+                CellVertex { x, y: y + h },
+                CellVertex { x, y },
+            ],
+        }
+    }
+
+    /// A `U` opening upward: the gap between its arms is inside the bounding box but outside
+    /// the shape, which is the whole point of testing concave collision.
+    fn u_shape(id: i32, velocity: [i32; 2]) -> ObstaclePoly {
+        ObstaclePoly {
+            id,
+            dynamic: true,
+            velocity,
+            vertices: vec![
+                CellVertex { x: 2, y: 2 },
+                CellVertex { x: 8, y: 2 },
+                CellVertex { x: 8, y: 8 },
+                CellVertex { x: 7, y: 8 },
+                CellVertex { x: 7, y: 3 },
+                CellVertex { x: 3, y: 3 },
+                CellVertex { x: 3, y: 8 },
+                CellVertex { x: 2, y: 8 },
+                CellVertex { x: 2, y: 2 },
+            ],
+        }
+    }
+
+    fn tick(obstacles: &mut [ObstaclePoly], robot: Option<[i32; 2]>) -> MotionReport {
+        let mut rng = Xorshift::new(1);
+        advance_one_tick(obstacles, &mut rng, 20, 20, robot)
+    }
+
+    #[test]
+    fn a_velocity_translates_the_whole_shape() {
+        let mut obstacles = vec![box_at(1, 0, 0, 2, 2, [3, -0])];
+        let report = tick(&mut obstacles, None);
+
+        assert_eq!(report.moved, 1);
+        assert!(report.blocked.is_empty());
+        // Every corner moved by the same amount: a translation is rigid.
+        assert_eq!(obstacles[0].cells(), vec![[3, 0], [5, 0], [5, 2], [3, 2], [3, 0]]);
+    }
+
+    #[test]
+    fn a_translation_that_would_leave_the_grid_is_refused_whole() {
+        // Clamping the corners that fall off while letting the rest travel would reshape the
+        // obstacle into something nobody drew, so the wall blocks like any other obstruction.
+        let mut obstacles = vec![box_at(1, 17, 0, 2, 2, [3, 0])];
+        let before = obstacles[0].clone();
+        let report = tick(&mut obstacles, None);
+
+        assert_eq!(report.moved, 0);
+        assert_eq!(report.blocked, vec![1]);
+        assert_eq!(obstacles[0], before, "a refused move must change nothing");
+    }
+
+    #[test]
+    fn an_obstacle_stops_rather_than_overlap_another() {
+        let mut obstacles = vec![box_at(1, 0, 0, 2, 2, [2, 0]), box_at(2, 3, 0, 2, 2, [0, 0])];
+        // The second is dynamic with no velocity, so it jitters; freeze it to keep this test
+        // about the first one's translation.
+        obstacles[1].dynamic = false;
+
+        let report = tick(&mut obstacles, None);
+        assert_eq!(report.moved, 0);
+        assert_eq!(report.blocked, vec![1]);
+        assert_eq!(obstacles[0].cells()[0], [0, 0], "it should not have moved");
+    }
+
+    #[test]
+    fn collision_follows_the_shape_rather_than_its_bounding_box() {
+        // A box driving into the mouth of a `U`. Their bounding boxes overlap immediately, so
+        // an AABB test would refuse the move — but the cells do not, and the box should slide
+        // cleanly into the gap. This is what makes the check concave-correct.
+        let mut obstacles = vec![u_shape(1, [0, 0]), box_at(2, 4, 10, 2, 2, [0, -4])];
+        obstacles[0].dynamic = false;
+
+        let report = tick(&mut obstacles, None);
+        assert_eq!(report.moved, 1, "the gap in the U is free space");
+        assert!(report.blocked.is_empty());
+        assert_eq!(obstacles[1].cells()[0], [4, 6]);
+
+        // One more step drives it into the closed end, which must be refused.
+        obstacles[1].velocity = [0, -3];
+        let report = tick(&mut obstacles, None);
+        assert_eq!(report.moved, 0);
+        assert_eq!(report.blocked, vec![2]);
+    }
+
+    #[test]
+    fn an_obstacle_stops_rather_than_run_the_robot_over() {
+        let mut obstacles = vec![box_at(1, 0, 0, 2, 2, [3, 0])];
+        let report = tick(&mut obstacles, Some([4, 1]));
+
+        // Reported apart from `blocked`: two obstacles jostling is scenery, a machine being
+        // driven at is a warning.
+        assert_eq!(report.robot_hits, vec![1]);
+        assert!(report.blocked.is_empty());
+        assert_eq!(report.moved, 0);
+        assert_eq!(obstacles[0].cells()[0], [0, 0]);
+    }
+
+    #[test]
+    fn a_blocked_obstacle_moves_again_once_the_way_clears() {
+        // Nothing is latched: the refusal lasts one tick, so obstacles that drift apart
+        // resume on their own rather than needing a flag cleared.
+        let mut obstacles = vec![box_at(1, 0, 0, 2, 2, [3, 0])];
+        assert_eq!(tick(&mut obstacles, Some([4, 1])).robot_hits, vec![1]);
+
+        let report = tick(&mut obstacles, Some([15, 15]));
+        assert_eq!(report.moved, 1);
+        assert!(report.robot_hits.is_empty());
+    }
+
+    #[test]
+    fn a_static_obstacle_never_translates_however_fast_it_claims_to_be() {
+        // `dynamic` stays the master switch: velocity on scenery is inert, not a back door.
+        let mut obstacles = vec![box_at(1, 0, 0, 2, 2, [3, 3])];
+        obstacles[0].dynamic = false;
+        let before = obstacles[0].clone();
+
+        assert_eq!(tick(&mut obstacles, None), MotionReport::default());
+        assert_eq!(obstacles[0], before);
+    }
+
     // --- jitter -----------------------------------------------------------
 
     /// A closed square ring, as the client stores one: first corner repeated at the end.
@@ -221,6 +509,7 @@ mod tests {
         ObstaclePoly {
             id: 1,
             dynamic,
+            velocity: [0, 0],
             vertices: vec![
                 CellVertex { x: 3, y: 3 },
                 CellVertex { x: 6, y: 3 },
@@ -294,6 +583,7 @@ mod tests {
             let mut obstacle = ObstaclePoly {
                 id: 1,
                 dynamic: true,
+                velocity: [0, 0],
                 vertices: vec![
                     CellVertex { x: 0, y: 0 },
                     CellVertex { x: 1, y: 0 },
@@ -338,7 +628,7 @@ mod tests {
         // whichever draw the first tick happened to make.
         let mut moved = 0;
         for _ in 0..20 {
-            moved += advance_one_tick(&mut obstacles, &mut rng, 10, 10);
+            moved += advance_one_tick(&mut obstacles, &mut rng, 10, 10, None).moved;
             if moved > 0 {
                 break;
             }
@@ -355,7 +645,7 @@ mod tests {
         let mut obstacles = vec![square(false), square(false)];
         let before = obstacles.clone();
         let mut rng = Xorshift::new(5);
-        assert_eq!(advance_one_tick(&mut obstacles, &mut rng, 10, 10), 0);
+        assert_eq!(advance_one_tick(&mut obstacles, &mut rng, 10, 10, None).moved, 0);
         assert_eq!(obstacles, before);
     }
 

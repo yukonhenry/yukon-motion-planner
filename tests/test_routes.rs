@@ -166,7 +166,8 @@ fn unique_name() -> String {
 }
 
 /// Wraps bare `[[x, y], …]` polygons in the envelope `obs_polygons` is actually stored in:
-/// each shape an object carrying `id` and `dynamic` beside its `{x, y}` vertex list.
+/// each shape an object carrying `id`, `dynamic` and `velocity` beside its `{x, y}` vertex
+/// list. Static and stationary, which is what most of these tests want.
 ///
 /// The tests below draw shapes as coordinate lists because that reads as a picture, and the
 /// envelope is identical in nearly every one of them — so it is added here rather than
@@ -188,7 +189,12 @@ fn polys(bare: Value) -> Value {
                         json!({ "x": pair[0], "y": pair[1] })
                     })
                     .collect();
-                json!({ "id": index as i32, "dynamic": false, "vertices": vertices })
+                json!({
+                    "id": index as i32,
+                    "dynamic": false,
+                    "velocity": [0, 0],
+                    "vertices": vertices,
+                })
             })
             .collect(),
     )
@@ -595,7 +601,7 @@ async fn a_vertex_missing_a_coordinate_is_rejected_before_the_handler() {
             &unique_name(),
             10,
             10,
-            json!([{ "id": 0, "dynamic": false, "vertices": [{"x": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] }]),
+            json!([{ "id": 0, "dynamic": false, "velocity": [0, 0], "vertices": [{"x": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] }]),
         ),
     )
         .await;
@@ -619,8 +625,8 @@ async fn obstacles_sharing_an_id_are_rejected() {
             10,
             10,
             json!([
-                { "id": 4, "dynamic": false, "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
-                { "id": 4, "dynamic": true,  "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
+                { "id": 4, "dynamic": false, "velocity": [0, 0], "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
+                { "id": 4, "dynamic": true, "velocity": [0, 0], "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
             ]),
         ),
     )
@@ -642,8 +648,8 @@ async fn the_dynamic_flag_survives_a_round_trip() {
     // `dynamic` is the whole point of the envelope, so it has to come back as it went in —
     // per obstacle, and independently.
     let polygons = json!([
-        { "id": 1, "dynamic": true,  "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
-        { "id": 2, "dynamic": false, "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
+        { "id": 1, "dynamic": true, "velocity": [0, 0], "vertices": [{"x": 0, "y": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] },
+        { "id": 2, "dynamic": false, "velocity": [0, 0], "vertices": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 6, "y": 6}] },
     ]);
 
     let created = create_grid(&client, &base, 10, 10, polygons.clone()).await;
@@ -687,6 +693,7 @@ fn wobbly_square() -> Value {
     json!([{
         "id": 1,
         "dynamic": true,
+        "velocity": [0, 0],
         "vertices": [
             {"x": 3, "y": 3}, {"x": 5, "y": 3}, {"x": 5, "y": 5},
             {"x": 3, "y": 5}, {"x": 3, "y": 3},
@@ -860,6 +867,7 @@ async fn replan_reports_an_unreachable_goal_without_failing() {
     let wall = json!([{
         "id": 1,
         "dynamic": false,
+        "velocity": [0, 0],
         "vertices": [{"x": 3, "y": 0}, {"x": 3, "y": 4}, {"x": 3, "y": 4}, {"x": 3, "y": 0}],
     }]);
 
@@ -892,6 +900,7 @@ async fn a_dynamic_obstacle_still_blocks_the_route_it_covers() {
         json!([{
             "id": 0,
             "dynamic": dynamic,
+            "velocity": [0, 0],
             "vertices": [{"x": 2, "y": 0}, {"x": 2, "y": 3}, {"x": 2, "y": 3}, {"x": 2, "y": 0}],
         }])
     };
@@ -1458,6 +1467,124 @@ async fn deleting_a_grid_twice_is_404_the_second_time() {
         .await
         .unwrap();
     assert_eq!(second.status(), 404, "delete is not silently idempotent");
+}
+
+#[tokio::test]
+async fn a_velocity_too_large_for_the_grid_is_rejected() {
+    // Rejected because it could never produce a move, not because it is fast. A translation
+    // is refused whole when any corner would leave the grid, so a component at least as wide
+    // as the grid is blocked from every column there is — the obstacle would sit still
+    // forever while reporting itself blocked on every tick.
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    let travelling = |velocity: Value| {
+        json!([{
+            "id": 1,
+            "dynamic": true,
+            "velocity": velocity,
+            "vertices": [{"x": 0, "y": 0}, {"x": 2, "y": 0}, {"x": 2, "y": 2}],
+        }])
+    };
+
+    for (velocity, axis) in [(json!([10, 0]), "x"), (json!([0, -10]), "y")] {
+        let res = client
+            .post(format!("{base}/grids"))
+            .json(&grid_body(&unique_name(), 10, 10, travelling(velocity.clone())))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400, "{velocity} should be rejected");
+        assert!(res_contains(res, &format!("{axis} velocity")).await);
+    }
+
+    // One under the bound is legal: it can move from at least one column, and whether it is
+    // blocked right now is a fact about this moment rather than about the setting.
+    let res = client
+        .post(format!("{base}/grids"))
+        .json(&grid_body(&unique_name(), 10, 10, travelling(json!([9, 9]))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+
+    // And stationary is always fine, whatever the grid measures — it is the default, and it
+    // means "jitter a corner" rather than "travel nowhere".
+    let res = client
+        .post(format!("{base}/grids"))
+        .json(&grid_body(&unique_name(), 1, 1, json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+}
+
+#[tokio::test]
+async fn a_velocity_translates_an_obstacle_across_ticks() {
+    // Translation is the other motion model: `dynamic` with no velocity jitters a corner,
+    // `dynamic` with one moves the whole shape rigidly.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_empty_grid(&client, &base, 20, 20).await["id"]
+        .as_i64()
+        .unwrap();
+
+    let travelling = json!([{
+        "id": 1,
+        "dynamic": true,
+        "velocity": [2, 0],
+        "vertices": [
+            {"x": 0, "y": 8}, {"x": 2, "y": 8}, {"x": 2, "y": 10},
+            {"x": 0, "y": 10}, {"x": 0, "y": 8},
+        ],
+    }]);
+
+    let res = post_replan(&client, &base, grid_id, [0, 0], [19, 19], &travelling, Some(1)).await;
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+
+    assert_eq!(body["moved"], 1);
+    assert!(body["blocked"].as_array().unwrap().is_empty());
+    // Every corner shifted by the same amount, and the shape is otherwise untouched.
+    assert_eq!(body["obs_polygons"][0]["vertices"][0], json!({"x": 2, "y": 8}));
+    assert_eq!(body["obs_polygons"][0]["vertices"][2], json!({"x": 4, "y": 10}));
+    assert_eq!(
+        body["obs_polygons"][0]["velocity"],
+        json!([2, 0]),
+        "velocity travels with the obstacle so the next tick can continue it",
+    );
+}
+
+#[tokio::test]
+async fn an_obstacle_driving_into_the_grid_edge_reports_itself_blocked() {
+    // Refused whole rather than clamped: clamping the corners that fall off while letting the
+    // rest travel would reshape an obstacle the user drew as rigid.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_empty_grid(&client, &base, 10, 10).await["id"]
+        .as_i64()
+        .unwrap();
+
+    let at_the_wall = json!([{
+        "id": 7,
+        "dynamic": true,
+        "velocity": [3, 0],
+        "vertices": [
+            {"x": 7, "y": 4}, {"x": 9, "y": 4}, {"x": 9, "y": 6},
+            {"x": 7, "y": 6}, {"x": 7, "y": 4},
+        ],
+    }]);
+
+    let res = post_replan(&client, &base, grid_id, [0, 0], [0, 9], &at_the_wall, Some(1)).await;
+    let body: Value = res.json().await.unwrap();
+
+    assert_eq!(body["moved"], 0);
+    assert_eq!(body["blocked"], json!([7]), "the id names the shape that is stuck");
+    assert_eq!(
+        body["obs_polygons"][0]["vertices"][0],
+        json!({"x": 7, "y": 4}),
+        "a refused move must leave the obstacle exactly as it was",
+    );
 }
 
 // --- robots --------------------------------------------------------------
@@ -2329,6 +2456,7 @@ async fn a_run_over_scenery_alone_is_refused() {
         json!([{
             "id": 1,
             "dynamic": false,
+            "velocity": [0, 0],
             "vertices": [
                 {"x": 3, "y": 3}, {"x": 5, "y": 3}, {"x": 5, "y": 5},
                 {"x": 3, "y": 5}, {"x": 3, "y": 3},

@@ -115,7 +115,13 @@ impl RobotBody {
     /// the planner said was safe, and a robot that outran its plan would be moving through
     /// cells nothing has checked. A robot with no route — the goal is walled off this tick —
     /// stays put and banks nothing, so it does not lurch forward when the way reopens.
-    pub fn advance(&mut self, max_velocity: f64) -> usize {
+    ///
+    /// `blocked` reports whether a cell is occupied *now*. The route was planned against the
+    /// world as it stood at the last replan, and the obstacles have had ticks of their own
+    /// since; without this the robot would walk into a shape that drifted across its path
+    /// between one thought and the next. It stops on the last free cell rather than refusing
+    /// to move at all, so it still makes what progress the route allows.
+    pub fn advance(&mut self, max_velocity: f64, blocked: impl Fn([i32; 2]) -> bool) -> usize {
         if self.route.len() < 2 {
             self.budget = 0.0;
             return 0;
@@ -125,8 +131,26 @@ impl RobotBody {
         // The route includes the cell the robot is standing on, so the steps available are
         // one fewer than its length.
         let available = self.route.len() - 1;
-        let steps = (self.budget.floor() as usize).min(available);
+        let wanted = (self.budget.floor() as usize).min(available);
+        if wanted == 0 {
+            return 0;
+        }
+
+        // Walk cell by cell so the robot halts *at* the obstacle rather than tunnelling
+        // through it: checking only the destination would let a fast robot step clean over a
+        // shape standing in the middle of its path.
+        let mut steps = 0;
+        while steps < wanted {
+            let (x, y) = self.route[steps + 1];
+            if blocked([x as i32, y as i32]) {
+                break;
+            }
+            steps += 1;
+        }
+
         if steps == 0 {
+            // Held up rather than idle. The unspent budget stays banked: the robot wanted to
+            // move and was prevented, so it should not also lose the distance it had earned.
             return 0;
         }
 
@@ -175,9 +199,9 @@ mod tests {
     #[test]
     fn a_whole_velocity_walks_that_many_cells() {
         let mut robot = RobotBody::new([0, 0], [4, 0], straight_line(5));
-        assert_eq!(robot.advance(2.0), 2);
+        assert_eq!(robot.advance(2.0, |_| false), 2);
         assert_eq!(robot.position, [2, 0]);
-        assert_eq!(robot.advance(2.0), 2);
+        assert_eq!(robot.advance(2.0, |_| false), 2);
         assert!(robot.arrived());
     }
 
@@ -186,11 +210,11 @@ mod tests {
         // The property that makes fractional speeds mean anything: a quarter-speed robot
         // moves on every fourth tick rather than never.
         let mut robot = RobotBody::new([0, 0], [2, 0], straight_line(3));
-        assert_eq!(robot.advance(0.25), 0);
-        assert_eq!(robot.advance(0.25), 0);
-        assert_eq!(robot.advance(0.25), 0);
+        assert_eq!(robot.advance(0.25, |_| false), 0);
+        assert_eq!(robot.advance(0.25, |_| false), 0);
+        assert_eq!(robot.advance(0.25, |_| false), 0);
         assert_eq!(robot.position, [0, 0], "it should not have moved yet");
-        assert_eq!(robot.advance(0.25), 1);
+        assert_eq!(robot.advance(0.25, |_| false), 1);
         assert_eq!(robot.position, [1, 0]);
     }
 
@@ -199,9 +223,38 @@ mod tests {
         // The route is the last thing checked for obstacles, so overshooting it would put the
         // robot through cells nothing has looked at.
         let mut robot = RobotBody::new([0, 0], [9, 0], straight_line(3));
-        assert_eq!(robot.advance(100.0), 2);
+        assert_eq!(robot.advance(100.0, |_| false), 2);
         assert_eq!(robot.position, [2, 0]);
         assert!(!robot.arrived(), "it reached the route's end, not the goal");
+    }
+
+    #[test]
+    fn a_robot_halts_at_an_obstacle_that_drifted_onto_its_route() {
+        // The route was safe when it was planned; an obstacle has moved since. The robot must
+        // stop on the last free cell rather than walk through the shape.
+        let mut robot = RobotBody::new([0, 0], [4, 0], straight_line(5));
+        assert_eq!(robot.advance(4.0, |cell| cell == [3, 0]), 2);
+        assert_eq!(robot.position, [2, 0], "it should stop just short of the blocker");
+        assert!(!robot.arrived());
+    }
+
+    #[test]
+    fn a_fast_robot_cannot_tunnel_through_a_blocked_cell() {
+        // Checking only the destination would let a robot with four cells of budget step
+        // clean over a one-cell obstacle sitting in the middle of its path.
+        let mut robot = RobotBody::new([0, 0], [4, 0], straight_line(5));
+        assert_eq!(robot.advance(4.0, |cell| cell == [1, 0]), 0);
+        assert_eq!(robot.position, [0, 0]);
+    }
+
+    #[test]
+    fn a_blocked_robot_keeps_the_distance_it_earned() {
+        // Being held up is not the same as standing still: the robot wanted to move, so the
+        // budget it had banked should still be there when the way clears.
+        let mut robot = RobotBody::new([0, 0], [2, 0], straight_line(3));
+        assert_eq!(robot.advance(1.0, |cell| cell == [1, 0]), 0);
+        assert_eq!(robot.advance(0.0, |_| false), 1, "the banked step should still buy a move");
+        assert_eq!(robot.position, [1, 0]);
     }
 
     #[test]
@@ -209,11 +262,11 @@ mod tests {
         // An empty route means the goal was unreachable this tick. Banking through the outage
         // would make the robot lurch several cells the moment the way reopened.
         let mut robot = RobotBody::new([0, 0], [4, 0], Vec::new());
-        assert_eq!(robot.advance(1.0), 0);
-        assert_eq!(robot.advance(1.0), 0);
+        assert_eq!(robot.advance(1.0, |_| false), 0);
+        assert_eq!(robot.advance(1.0, |_| false), 0);
         assert_eq!(robot.position, [0, 0]);
 
         robot.follow(straight_line(3));
-        assert_eq!(robot.advance(1.0), 1, "no banked distance from the outage");
+        assert_eq!(robot.advance(1.0, |_| false), 1, "no banked distance from the outage");
     }
 }
