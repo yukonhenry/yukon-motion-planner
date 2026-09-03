@@ -1,0 +1,32 @@
+# One formatting baseline for a repo with two language stacks.
+#
+# RustRover reads this directly, and so does Prettier, which is what keeps the IDE's own
+# formatter and the frontend's formatter from disagreeing about indentation. Note that
+# rustfmt does *not* read it — the [*.rs] block describes what RustRover should do while you
+# type, and it is written to match rustfmt's own defaults (4-space, max_width = 100) so the
+# two never fight.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.rs]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.{ts,tsx,js,jsx,mjs,cjs,css,json,html}]
+indent_style = space
+indent_size = 2
+
+# Trailing whitespace is a line break in Markdown, so stripping it changes the rendering.
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
