@@ -1,6 +1,6 @@
-use crate::entities::plans;
-use crate::handlers::grid_crud::validate_polygons;
-use crate::handlers::helpers::{AppError, find_grid};
+use crate::entities::{grid_world_states, robots, route_plans};
+use crate::handlers::helpers::validate_polygons;
+use crate::handlers::helpers::{AppError, find_grid, record_state};
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
@@ -11,40 +11,97 @@ use crate::router::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+    Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PlanInput {
     src_vertex: [i32; 2],
     dest_vertex: [i32; 2],
+    obs_polygons: Vec<ObstaclePoly>,
+    /// Who will drive this route.
+    ///
+    /// Required: a route is planned *for* a machine, and a run takes its speed and cadence
+    /// from that machine. Accepting a driverless plan would only defer the problem to the
+    /// moment someone pressed Run.
+    robot_id: i32,
 }
 
-// GET /grids/{id}/plans — the plans computed against this grid.
+/// One stored route, as a client sees it.
+///
+/// Carries `grid_id` even though the row does not: a route plan names the world it was
+/// planned in, and the grid is a join behind that. The client asked about a grid and should
+/// get an answer in those terms rather than having to resolve a state id of its own.
+#[derive(Debug, Serialize)]
+pub(crate) struct RoutePlanOutput {
+    id: i32,
+    grid_id: i32,
+    /// Which world this route was planned in — the row it actually points at.
+    grid_world_state_id: i32,
+    /// Who drives this route.
+    robot_id: i32,
+    name: String,
+    src_vertex: serde_json::Value,
+    dest_vertex: serde_json::Value,
+    /// The cells the route runs through, start first — empty when the goal is unreachable.
+    route_vertices: serde_json::Value,
+    meta: serde_json::Value,
+}
+
+impl RoutePlanOutput {
+    fn new(plan: route_plans::Model, grid_id: i32) -> Self {
+        Self {
+            id: plan.id,
+            grid_id,
+            grid_world_state_id: plan.grid_world_state_id,
+            robot_id: plan.robot_id,
+            name: plan.name,
+            src_vertex: plan.src_vertex,
+            dest_vertex: plan.dest_vertex,
+            route_vertices: plan.route_vertices,
+            meta: plan.meta,
+        }
+    }
+}
+
+// GET /grids/{id}/plans — the route plans computed against this grid.
 //
-// Also how a client learns the grid is frozen: a non-empty list means edits have to
+// Client must determine that a grid is frozen: a non-empty list means edits have to
 // fork a new version. Deriving it from the plans themselves keeps the client's idea of
 // "frozen" and the server's the same thing rather than two flags to keep in step.
+//
+// Still addressed by grid even though a route plan names a *world*: the grid is one join
+// away, and "the routes across this grid" is the question a client actually has. A
+// state-shaped route is the eventual home for this.
 pub(crate) async fn list_grid_plans(
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<Vec<plans::Model>>, AppError> {
+) -> Result<Json<Vec<RoutePlanOutput>>, AppError> {
     // An unknown grid is a 404 rather than an empty list, so a stale id can't read as
     // "this grid is editable".
     find_grid(&state.db, id).await?;
 
-    let found = plans::Entity::find()
-        .filter(plans::Column::GridId.eq(id))
+    let found = route_plans::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            route_plans::Relation::GridWorldStates.def(),
+        )
+        .filter(grid_world_states::Column::GridWorldId.eq(id))
         .all(&state.db)
         .await?;
-    Ok(Json(found))
+    Ok(Json(
+        found.into_iter().map(|plan| RoutePlanOutput::new(plan, id)).collect(),
+    ))
 }
 
 pub(crate) async fn generate_grid_plan(
     State(state): State<AppState>,
     Path(id): Path<i32>,
     Json(payload): Json<PlanInput>,
-) -> Result<(StatusCode, Json<plans::Model>), AppError> {
+) -> Result<(StatusCode, Json<RoutePlanOutput>), AppError> {
     let grid = find_grid(&state.db, id).await?;
     let mut grid_world = GridWorldManager::<Cell>::new(grid.width as usize, grid.height as usize);
 
@@ -54,8 +111,21 @@ pub(crate) async fn generate_grid_plan(
     //
     // Decoded whole rather than per element, so one malformed obstacle rejects the request
     // instead of leaving a grid rasterized from the shapes that happened to parse.
-    let obstacles: Vec<ObstaclePoly> = serde_json::from_value(grid.obs_polygons.clone())
-        .map_err(|e| AppError::Invalid(format!("stored obstacles are malformed: {e}")))?;
+    let obstacles: Vec<ObstaclePoly> = payload.obs_polygons;
+    validate_polygons(&obstacles, grid.width, grid.height)?;
+
+    // Checked rather than left to the foreign key, which reports an unknown robot as a
+    // driver-level error and would surface as a 500 instead of naming the bad id.
+    if robots::Entity::find_by_id(payload.robot_id)
+        .one(&state.db)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!(
+            "robot {} not found",
+            payload.robot_id
+        )));
+    }
 
     // Only the geometry reaches the rasterizer: `id` and `dynamic` say nothing about which
     // cells a shape covers right now.
@@ -73,33 +143,49 @@ pub(crate) async fn generate_grid_plan(
             Err(PlanError::Unreachable) => Vec::new(),
             Err(err) => return Err(AppError::Invalid(err.to_string())),
         };
-    let vertices = optimal_path
+    let route_vertices = optimal_path
         .iter()
         .map(|cell| grid_world.xy(*cell))
         .collect::<Vec<_>>();
 
-    // Set meta information associated with the generated plan.
-    // This includes the planner used, source and destination vertices, whether the destination is reachable,
-    // and the cost of the path.
+    // What is left once the endpoints have columns of their own: how the route was found,
+    // and what it cost. `reachable` is derived rather than sent, so it cannot disagree with
+    // the route beside it.
     let meta = serde_json::json!({
         "planner": kind.name(),
-        "src_vertex": payload.src_vertex,
-        "dest_vertex": payload.dest_vertex,
-        "reachable": !vertices.is_empty(),
+        "reachable": !route_vertices.is_empty(),
         "cost": grid_world.path_cost(&optimal_path),
     });
 
-    let new_plan = plans::ActiveModel {
-        grid_id: Set(id),
+    // The world is written first and the route points at it, rather than the route carrying
+    // a copy. One row is then the single account of "the obstacles at this moment", shared by
+    // every route planned in it, and the two can never drift apart.
+    //
+    // Appended rather than overwriting the opening state, because the obstacles are the
+    // caller's — mid-run they are not the grid's initial condition, and rewriting sequence 0
+    // would rewrite history the earlier plans still refer to. Appended only when the world
+    // actually moved: planning twice against unchanged geometry points both routes at the
+    // same row. See [`record_state`].
+    let txn = state.db.begin().await?;
+
+    let world = record_state(&txn, id, &obstacles).await?;
+
+    let new_plan = route_plans::ActiveModel {
+        grid_world_state_id: Set(world.id),
+        robot_id: Set(payload.robot_id),
         name: Set(String::from("Prototype")),
-        vertices: Set(serde_json::to_value(vertices)
+        src_vertex: Set(serde_json::json!(payload.src_vertex)),
+        dest_vertex: Set(serde_json::json!(payload.dest_vertex)),
+        route_vertices: Set(serde_json::to_value(route_vertices)
             .map_err(|e| AppError::Invalid(format!("failed to serialize plan vertices: {e}")))?),
         meta: Set(meta),
         ..Default::default() // leaves `id` unset so the DB generates it
     };
 
-    let saved = new_plan.insert(&state.db).await?;
-    Ok((StatusCode::CREATED, Json(saved)))
+    let saved = new_plan.insert(&txn).await?;
+    txn.commit().await?;
+
+    Ok((StatusCode::CREATED, Json(RoutePlanOutput::new(saved, id))))
 }
 
 // Request body for `POST /grids/{id}/replan` — one tick of a simulation.
@@ -114,7 +200,7 @@ pub(crate) struct ReplanInput {
     dest_vertex: [i32; 2],
     /// Where the obstacles are *now*, as the previous response left them.
     obs_polygons: Vec<ObstaclePoly>,
-    /// Omit on the first tick; afterwards pass back the `next_seed` from the last response.
+    /// Omit on the first tick; subsequently pass back the `next_seed` from the last response.
     ///
     /// Chaining the seed rather than sending a tick number is what makes a whole run replayable
     /// from its first value: consecutive small integers are not independent xorshift seeds, so
@@ -211,7 +297,9 @@ pub(crate) async fn delete_plan(
     Path(plan_id): Path<i32>,
 ) -> Result<StatusCode, AppError> {
     // `rows_affected` doubles as the existence check, so this stays one round trip.
-    let res = plans::Entity::delete_by_id(plan_id).exec(&state.db).await?;
+    let res = route_plans::Entity::delete_by_id(plan_id)
+        .exec(&state.db)
+        .await?;
     if res.rows_affected == 0 {
         return Err(AppError::NotFound(format!("plan {plan_id} not found")));
     }

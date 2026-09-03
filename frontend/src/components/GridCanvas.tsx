@@ -46,6 +46,13 @@ interface Props {
    * frozen against edits, and a grid with unsaved edits refuses to plan.
    */
   route: Vertex[] | null;
+  /**
+   * Where the robot is standing, or `null` when no run is going.
+   *
+   * Drawn on top of the endpoints: during a run the robot is what the eye should follow, and
+   * it starts life sitting exactly on the S marker.
+   */
+  robot: Vertex | null;
   /** Shade the cells the planner actually blocks, not just the drawn outline. */
   showFootprint: boolean;
 }
@@ -86,6 +93,7 @@ export function GridCanvas({
   src,
   dest,
   route,
+  robot,
   showFootprint,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -313,6 +321,12 @@ export function GridCanvas({
             </text>
           </g>
         ) : null,
+      )}
+
+      {robot && (
+        <g className="robot">
+          <circle cx={cellToPixel(robot[0])} cy={cellToPixel(robot[1])} r={7} />
+        </g>
       )}
 
       {draft && draft.length > 0 && (

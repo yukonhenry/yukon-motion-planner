@@ -13,6 +13,7 @@
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
+use crate::models::robot::RobotBody;
 use crate::models::planners::{PlanError, PlannerKind};
 use crate::models::rng::Xorshift;
 
@@ -30,6 +31,12 @@ pub(crate) struct SimWorld {
     /// the two clocks are independent, and a plan labelled with the environment tick it was
     /// computed against is what makes "the planner is three ticks behind" legible.
     env_tick: u64,
+    /// The machine crossing this world.
+    ///
+    /// Shared state rather than the robot task's own, because a run's status has to report
+    /// where the robot is to a client that joined late — the same reason the obstacles live
+    /// here rather than in the environment task.
+    robot: RobotBody,
 }
 
 impl SimWorld {
@@ -38,14 +45,36 @@ impl SimWorld {
     /// The seed is the run's identity as far as reproducibility goes — the same seed over the
     /// same starting geometry replays the same walk — so it is taken rather than invented
     /// here, and reported back to the caller by the handler that starts the run.
-    pub(crate) fn new(width: i32, height: i32, obstacles: Vec<ObstaclePoly>, seed: u64) -> Self {
+    pub(crate) fn new(
+        width: i32,
+        height: i32,
+        obstacles: Vec<ObstaclePoly>,
+        seed: u64,
+        robot: RobotBody,
+    ) -> Self {
         Self {
             width,
             height,
             obstacles,
             rng: Xorshift::new(seed),
             env_tick: 0,
+            robot,
         }
+    }
+
+    /// The robot, for a task that is about to move it.
+    pub(crate) fn robot_mut(&mut self) -> &mut RobotBody {
+        &mut self.robot
+    }
+
+    /// Where the robot is standing, and whether that is its goal.
+    pub(crate) fn robot_at(&self) -> ([i32; 2], bool) {
+        (self.robot.position, self.robot.arrived())
+    }
+
+    /// Where the robot is trying to get to. Fixed for the life of a run.
+    pub(crate) fn robot_dest(&self) -> [i32; 2] {
+        self.robot.dest
     }
 
     /// One environment tick: jitters every dynamic obstacle, and reports how many moved.
@@ -144,6 +173,12 @@ mod tests {
     use super::*;
     use crate::models::obstacle::CellVertex;
 
+    /// A robot that is not the subject of these tests: `SimWorld` needs one, but nothing here
+    /// moves it, so it sits at the origin with somewhere else to be.
+    fn parked() -> RobotBody {
+        RobotBody::new([0, 0], [9, 9], Vec::new())
+    }
+
     fn square(id: i32, dynamic: bool) -> ObstaclePoly {
         ObstaclePoly {
             id,
@@ -163,7 +198,7 @@ mod tests {
         // A world of pure scenery still advances its clock. The distinction is what lets a
         // client tell "the simulation is running and nothing is moving" from "the simulation
         // has stalled".
-        let mut world = SimWorld::new(10, 10, vec![square(1, false)], 7);
+        let mut world = SimWorld::new(10, 10, vec![square(1, false)], 7, parked());
         let first = world.advance();
         assert_eq!(first.tick, 1);
         assert_eq!(first.moved, 0);
@@ -175,7 +210,7 @@ mod tests {
         // The property the whole seed-chaining design exists for: a run that exposes a
         // planner bug can be reported as one number.
         let run = |seed: u64| {
-            let mut world = SimWorld::new(10, 10, vec![square(1, true)], seed);
+            let mut world = SimWorld::new(10, 10, vec![square(1, true)], seed, parked());
             for _ in 0..20 {
                 world.advance();
             }
@@ -190,7 +225,7 @@ mod tests {
         // The planner takes snapshots on its own schedule. If taking one moved the walk, the
         // run would no longer replay from its seed, and the two frequencies would be coupled
         // through the random number generator of all things.
-        let mut world = SimWorld::new(10, 10, vec![square(1, true)], 99);
+        let mut world = SimWorld::new(10, 10, vec![square(1, true)], 99, parked());
         world.advance();
         let (obstacles, tick) = world.snapshot();
         assert_eq!(world.snapshot().0, obstacles);
@@ -227,7 +262,7 @@ mod tests {
 
     #[test]
     fn a_world_of_scenery_reports_nothing_dynamic() {
-        assert!(!SimWorld::new(10, 10, vec![square(1, false)], 1).has_dynamic_obstacles());
-        assert!(SimWorld::new(10, 10, vec![square(1, true)], 1).has_dynamic_obstacles());
+        assert!(!SimWorld::new(10, 10, vec![square(1, false)], 1, parked()).has_dynamic_obstacles());
+        assert!(SimWorld::new(10, 10, vec![square(1, true)], 1, parked()).has_dynamic_obstacles());
     }
 }

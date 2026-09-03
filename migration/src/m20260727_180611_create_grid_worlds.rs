@@ -21,18 +21,40 @@ impl MigrationTrait for Migration {
                     .col(string(GridWorlds::Name).not_null())
                     .col(integer(GridWorlds::Width).not_null())
                     .col(integer(GridWorlds::Height).not_null())
-                    .col(json_binary(GridWorlds::ObsPolygons))
+                    .col(double(GridWorlds::SimInterval).not_null().default(1.0))
                     .col(integer(GridWorlds::Version).not_null().default(0))
                     .to_owned(),
             )
-            .await
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx-grid_worlds-name-version")
+                    .table(GridWorlds::Table)
+                    .col(GridWorlds::Name)
+                    .col(GridWorlds::Version)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Replace the sample below with your own migration scripts
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx-grid_worlds-name-version")
+                    .table(GridWorlds::Table)
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(GridWorlds::Table).to_owned())
-            .await
+            .await?;
+        Ok(())
     }
 }
 
@@ -43,7 +65,6 @@ pub enum GridWorlds {
     Name,
     Width,
     Height,
-    ObsPolygons,
     Version,
     SimInterval,
 }

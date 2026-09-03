@@ -1,4 +1,4 @@
-import type { Endpoint, Plan, Vertex } from '../types';
+import type { Endpoint, Plan, Robot, Vertex } from '../types';
 
 interface Props {
   src: Vertex | null;
@@ -24,6 +24,11 @@ interface Props {
   unsaved: boolean;
   /** Saving would fork a new version rather than rewrite this one. */
   frozen: boolean;
+  /** The fleet, for choosing who drives the next route. */
+  robots: Robot[];
+  /** The chosen driver, or `null` for a route nobody runs. */
+  driverId: number | null;
+  onPickDriver: (robotId: number | null) => void;
 }
 
 const ENDPOINTS: { key: Endpoint; label: string }[] = [
@@ -48,9 +53,15 @@ export function RoutePanel({
   blocked,
   unsaved,
   frozen,
+  robots,
+  driverId,
+  onPickDriver,
 }: Props) {
   const cells = { src, dest };
-  const ready = src !== null && dest !== null && !blocked && !unsaved;
+  // A driver is part of what a plan *is*, so it gates Generate the same way the endpoints
+  // do rather than failing at the server.
+  const ready =
+    src !== null && dest !== null && driverId !== null && !blocked && !unsaved;
 
   return (
     <section className="panel">
@@ -84,6 +95,13 @@ export function RoutePanel({
         {/* Planning is refused rather than warned about, because the route would be
             computed against stored obstacles and drawn over the edited ones — a picture
             that is wrong without looking wrong. */}
+        {robots.length === 0 && (
+          <p className="muted hint">
+            Add a robot first — a route is planned for a machine, and the run takes its speed
+            and cadence from it.
+          </p>
+        )}
+
         {(blocked || unsaved) && (
           <p className="muted hint">
             {unsaved
@@ -93,6 +111,24 @@ export function RoutePanel({
                 : 'Save your changes first — routes are planned against the saved grid.'}
           </p>
         )}
+
+        {/* A plan records who will drive it. Required, not decorative: a run takes its
+            speed and cadence from the robot, so a route with nobody assigned could never be
+            simulated — which is why it is refused here rather than at Run. */}
+        <label className="row">
+          <span>Driver</span>
+          <select
+            value={driverId ?? ''}
+            onChange={(e) => onPickDriver(e.target.value === '' ? null : Number(e.target.value))}
+          >
+            <option value="">Choose a robot…</option>
+            {robots.map((robot) => (
+              <option key={robot.id} value={robot.id}>
+                {robot.name}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <div className="row">
           <button type="button" onClick={onGenerate} disabled={!ready || pending}>
@@ -109,9 +145,9 @@ export function RoutePanel({
         </div>
 
         {active &&
-          (active.vertices.length > 0 ? (
+          (active.route_vertices.length > 0 ? (
             <p className="muted">
-              {active.vertices.length} cells,{' '}
+              {active.route_vertices.length} cells,{' '}
               <span title="Scaled by 10: an orthogonal step costs 10, a diagonal 14.">
                 cost {active.meta.cost}
               </span>{' '}
@@ -132,7 +168,7 @@ export function RoutePanel({
                   <button type="button" className="subtle plan-list__pick" onClick={() => onShow(plan.id)}>
                     #{plan.id}{' '}
                     <span className="muted">
-                      [{plan.meta.src_vertex.join(', ')}] → [{plan.meta.dest_vertex.join(', ')}]
+                      [{plan.src_vertex.join(', ')}] → [{plan.dest_vertex.join(', ')}]
                     </span>
                   </button>
                   <button

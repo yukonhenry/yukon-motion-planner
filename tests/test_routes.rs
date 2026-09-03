@@ -23,10 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use migration::{Migrator, MigratorTrait};
 use reqwest::Client;
-use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
+use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use yukon_motion_planner::db::{self, connect, options};
-use yukon_motion_planner::entities::plans;
+use yukon_motion_planner::entities::{grid_world_states, route_plans};
 
 const TEST_DB: &str = "yukon_motion_planner_test";
 
@@ -71,7 +71,17 @@ async fn pool(url: &str) -> Result<DatabaseConnection, String> {
     connect(opts).await
 }
 
-/// Creates and migrates the test database, once per test binary, and answers with its URL.
+/// Rebuilds the test database from nothing, once per test binary, and answers with its URL.
+///
+/// Dropped and recreated every run rather than reused. Migrations in this project are
+/// rewritten in place rather than added to, and sea-orm only objects when a migration *file*
+/// disappears — rename a column inside an existing migration and `seaql_migrations` still
+/// reads as complete, so `up` does nothing and the suite quietly tests yesterday's schema.
+/// The failures that produces are 500s far from their cause. A fresh database costs a
+/// fraction of a second and makes the whole class of confusion impossible.
+///
+/// Safe to do unconditionally because this is the only test binary that touches Postgres,
+/// and each test already isolates itself by name — see [`unique_name`].
 ///
 /// Every `#[tokio::test]` builds its own runtime, so this gets a throwaway runtime on
 /// a thread of its own rather than borrowing whichever test happened to arrive first.
@@ -92,12 +102,21 @@ fn ensure_database() -> String {
                 .block_on(async {
                     let (admin_url, test_url) = database_urls()?;
 
-                    // `CREATE DATABASE` has to be issued from some *other* database.
+                    // Both statements have to be issued from some *other* database: you
+                    // cannot drop or create the one you are connected to.
                     let admin = pool(&admin_url).await?;
-                    // Fails harmlessly when the database already exists, i.e. every run but the first.
-                    let _ = admin
+
+                    // `WITH (FORCE)` because an interrupted run can leave a pool holding a
+                    // session, and "database is being accessed by other users" is a worse
+                    // outcome than closing a connection nothing is waiting on.
+                    admin
+                        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)"))
+                        .await
+                        .map_err(|err| format!("Could not drop {TEST_DB}: {err}"))?;
+                    admin
                         .execute_unprepared(&format!("CREATE DATABASE {TEST_DB}"))
-                        .await;
+                        .await
+                        .map_err(|err| format!("Could not create {TEST_DB}: {err}"))?;
                     let _ = admin.close().await;
 
                     let db = pool(&test_url).await?;
@@ -108,8 +127,8 @@ fn ensure_database() -> String {
                     Ok(test_url)
                 })
         })
-        .join()
-        .unwrap_or_else(|_| Err("test database setup panicked".to_string()))
+            .join()
+            .unwrap_or_else(|_| Err("test database setup panicked".to_string()))
     });
 
     match outcome {
@@ -179,6 +198,10 @@ fn polys(bare: Value) -> Value {
 /// included. `obs_polygons` is a list of obstacle objects; see [`polys`].
 fn grid_body(name: &str, width: i32, height: i32, obs_polygons: Value) -> Value {
     json!({ "name": name, "width": width, "height": height, "obs_polygons": obs_polygons })
+}
+
+fn route_body(src: [i32; 2], dest: [i32; 2], obstacles: &Value) -> Value {
+    json!({ "src_vertex": src, "dest_vertex": dest, "obs_polygons": obstacles })
 }
 
 async fn post_grid(client: &Client, base: &str, body: Value) -> reqwest::Response {
@@ -344,7 +367,7 @@ async fn an_obstacle_may_use_the_highest_valid_cell_index() {
             polys(json!([[[0, 0], [9, 0], [9, 9]]])),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 201);
 }
@@ -377,7 +400,7 @@ async fn the_listing_leaves_obstacles_out() {
         10,
         polys(json!([[[0, 0], [3, 0], [3, 2]]])),
     )
-    .await;
+        .await;
     let grid_id = created["id"].as_i64().unwrap();
 
     let listed = list_grids(&client, &base).await;
@@ -436,7 +459,7 @@ async fn an_obstacle_needs_at_least_three_vertices() {
         &base,
         grid_body(&unique_name(), 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
     assert!(res.text().await.unwrap().contains("at least 3 vertices"));
@@ -458,7 +481,7 @@ async fn vertices_past_the_grid_bounds_are_rejected() {
             polys(json!([[[0, 0], [10, 0], [0, 5]]])),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
     assert!(
@@ -484,7 +507,7 @@ async fn negative_vertices_are_rejected() {
             polys(json!([[[0, 0], [-1, 0], [0, 5]]])),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
     assert!(
@@ -511,7 +534,7 @@ async fn a_bad_obstacle_is_named_by_its_position_in_the_list() {
             polys(json!([[[0, 0], [3, 0], [3, 2]], [[0, 0], [1, 1]]])),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
     assert!(res.text().await.unwrap().contains("obstacle 1"));
@@ -528,7 +551,7 @@ async fn a_rejected_obstacle_saves_no_grid_at_all() {
         &base,
         grid_body(&name, 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
-    .await;
+        .await;
     assert_eq!(res.status(), 400);
 
     // Obstacles ride along with the grid, so a bad one has to take the whole insert
@@ -553,7 +576,7 @@ async fn a_malformed_vertex_pair_is_rejected_before_the_handler() {
         &base,
         grid_body(&unique_name(), 10, 10, json!([[[0, 0], [3], [3, 2]]])),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 422);
 }
@@ -575,7 +598,7 @@ async fn a_vertex_missing_a_coordinate_is_rejected_before_the_handler() {
             json!([{ "id": 0, "dynamic": false, "vertices": [{"x": 0}, {"x": 3, "y": 0}, {"x": 3, "y": 2}] }]),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 422);
 }
@@ -601,7 +624,7 @@ async fn obstacles_sharing_an_id_are_rejected() {
             ]),
         ),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
     let message = res.text().await.unwrap();
@@ -647,11 +670,7 @@ async fn post_replan(
     obstacles: &Value,
     seed: Option<u64>,
 ) -> reqwest::Response {
-    let mut body = json!({
-        "src_vertex": src,
-        "dest_vertex": dest,
-        "obs_polygons": obstacles,
-    });
+    let mut body = route_body(src, dest, obstacles);
     if let Some(seed) = seed {
         body["seed"] = json!(seed);
     }
@@ -691,7 +710,7 @@ async fn replan_returns_a_route_and_the_moved_obstacles() {
         &wobbly_square(),
         Some(12345),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 200);
     let body: Value = res.json().await.unwrap();
@@ -729,7 +748,7 @@ async fn replan_stores_nothing() {
             &wobbly_square(),
             Some(7),
         )
-        .await;
+            .await;
         assert_eq!(res.status(), 200);
     }
 
@@ -793,7 +812,7 @@ async fn replan_leaves_a_static_obstacle_where_it_is() {
         10,
         polys(json!([[[3, 3], [5, 3], [5, 5]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
     let statics = polys(json!([[[3, 3], [5, 3], [5, 5]]]));
 
@@ -823,7 +842,7 @@ async fn replan_rejects_obstacles_off_the_grid() {
         &polys(json!([[[0, 0], [10, 0], [0, 5]]])),
         Some(1),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 400);
 }
@@ -907,7 +926,7 @@ async fn obs_polygons_is_a_required_field() {
         &base,
         json!({ "name": unique_name(), "width": 10, "height": 10 }),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 422);
 }
@@ -925,7 +944,7 @@ async fn update_grid_replaces_every_field() {
         10,
         polys(json!([[[0, 0], [3, 0], [3, 2]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
     let replacement = polys(json!([[[1, 1], [4, 1], [4, 3], [1, 3]]]));
     let renamed = unique_name();
@@ -936,7 +955,7 @@ async fn update_grid_replaces_every_field() {
         grid_id,
         grid_body(&renamed, 20, 30, replacement.clone()),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 200);
     let body: Value = res.json().await.unwrap();
@@ -968,7 +987,7 @@ async fn update_grid_can_clear_the_obstacles() {
         10,
         polys(json!([[[0, 0], [3, 0], [3, 2]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
 
     // PUT replaces rather than merges, so an empty list means "no obstacles" — not
@@ -1042,7 +1061,7 @@ async fn a_grid_may_shrink_once_the_obstacles_go_with_it() {
         10,
         polys(json!([[[8, 8], [9, 8], [9, 9]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
 
     // The same shrink, with obstacles that fit the new bounds, is fine.
@@ -1052,7 +1071,7 @@ async fn a_grid_may_shrink_once_the_obstacles_go_with_it() {
         grid_id,
         edited(&grid, 5, 5, polys(json!([[[1, 1], [3, 1], [3, 3]]]))),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 200);
 }
@@ -1070,7 +1089,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         grid_id,
         edited(&grid, 10, 10, polys(json!([[[0, 0], [1, 1]]]))),
     )
-    .await;
+        .await;
     assert_eq!(too_few.status(), 400);
 
     let out_of_bounds = put_grid(
@@ -1079,7 +1098,7 @@ async fn update_grid_enforces_the_same_obstacle_validation_as_create() {
         grid_id,
         edited(&grid, 10, 10, polys(json!([[[0, 0], [10, 0], [0, 5]]]))),
     )
-    .await;
+        .await;
     assert_eq!(out_of_bounds.status(), 400);
 }
 
@@ -1101,7 +1120,7 @@ async fn a_grid_is_editable_until_something_is_planned_against_it() {
             grid_id,
             edited(&grid, size, size, json!([])),
         )
-        .await;
+            .await;
         assert_eq!(res.status(), 200);
     }
     assert_eq!(show_grid(&client, &base, grid_id).await["version"], 0);
@@ -1132,7 +1151,7 @@ async fn the_freeze_covers_dimensions_as_well_as_obstacles() {
         10,
         polys(json!([[[5, 5], [7, 5], [7, 7]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
     freeze_with_plan(&client, &base, grid_id).await;
 
@@ -1145,7 +1164,7 @@ async fn the_freeze_covers_dimensions_as_well_as_obstacles() {
         grid_id,
         edited(&grid, 40, 40, same_obstacles),
     )
-    .await;
+        .await;
     assert_eq!(res.status(), 409);
 }
 
@@ -1165,7 +1184,7 @@ async fn a_rename_is_also_blocked_once_plans_exist() {
         grid_id,
         grid_body(&unique_name(), 10, 10, json!([])),
     )
-    .await;
+        .await;
     assert_eq!(res.status(), 409);
 }
 
@@ -1207,7 +1226,7 @@ async fn a_new_version_is_a_new_row_leaving_the_original_intact() {
         10,
         polys(json!([[[4, 4], [6, 4], [6, 6]]])),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
     freeze_with_plan(&client, &base, grid_id).await;
     let replacement = polys(json!([[[6, 6], [8, 6], [8, 8]]]));
@@ -1218,7 +1237,7 @@ async fn a_new_version_is_a_new_row_leaving_the_original_intact() {
         grid_id,
         edited(&grid, 10, 10, replacement.clone()),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 201);
     let v1: Value = res.json().await.unwrap();
@@ -1297,7 +1316,7 @@ async fn a_new_version_enforces_the_same_obstacle_validation() {
         grid_id,
         edited(&grid, 10, 10, polys(json!([[[0, 0], [10, 0], [0, 5]]]))),
     )
-    .await;
+        .await;
     assert_eq!(res.status(), 400);
 }
 
@@ -1312,7 +1331,7 @@ async fn versioning_an_unknown_grid_is_404() {
         999999,
         grid_body(&unique_name(), 10, 10, json!([])),
     )
-    .await;
+        .await;
 
     assert_eq!(res.status(), 404);
 }
@@ -1378,7 +1397,7 @@ async fn deleting_a_grid_that_plans_depend_on_is_409() {
     assert_eq!(show_grid(&client, &base, grid_id).await["id"], grid_id);
     let db = db().await;
     assert!(
-        plans::Entity::find_by_id(plan_id as i32)
+        route_plans::Entity::find_by_id(plan_id as i32)
             .one(&db)
             .await
             .unwrap()
@@ -1441,8 +1460,117 @@ async fn deleting_a_grid_twice_is_404_the_second_time() {
     assert_eq!(second.status(), 404, "delete is not silently idempotent");
 }
 
+// --- robots --------------------------------------------------------------
+
+async fn post_robot(client: &Client, base: &str, body: Value) -> reqwest::Response {
+    client
+        .post(format!("{base}/robots"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A robot spec in the shape the API insists on: a name, and the two numbers a run needs.
+fn robot_body(name: &str, max_velocity: Value, task_interval: Value) -> Value {
+    json!({
+        "name": name,
+        "capabilities": { "max_velocity": max_velocity, "task_interval": task_interval },
+    })
+}
+
+#[tokio::test]
+async fn a_robot_round_trips_its_name_and_velocity() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    let res = post_robot(&client, &base, robot_body(&unique_name(), json!(2.5), json!(0.25))).await;
+    assert_eq!(res.status(), 201);
+
+    let robot: Value = res.json().await.unwrap();
+    assert_eq!(robot["capabilities"]["max_velocity"], 2.5);
+    assert_eq!(robot["capabilities"]["task_interval"], 0.25);
+
+    // Fractional speeds are the interesting ones — a robot slower than one cell per tick is
+    // exactly what makes the replanner's cadence matter — so this must not be an integer
+    // column in disguise.
+    assert!(robot["id"].is_i64());
+}
+
+#[tokio::test]
+async fn a_robot_needs_both_numbers_a_run_reads() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // Rejected on the way in rather than when a run starts. A robot that cannot move, or has
+    // no clock to move on, is one that stores fine and then fails at the moment someone
+    // presses Run — which is exactly the surprise this check exists to prevent.
+    for bad in [json!(0), json!(-1), json!("fast"), json!(null)] {
+        let res = post_robot(
+            &client,
+            &base,
+            robot_body(&unique_name(), bad.clone(), json!(0.5)),
+        )
+        .await;
+        assert_eq!(res.status(), 400, "max_velocity {bad} should be rejected");
+
+        let res = post_robot(
+            &client,
+            &base,
+            robot_body(&unique_name(), json!(1), bad.clone()),
+        )
+        .await;
+        assert_eq!(res.status(), 400, "task_interval {bad} should be rejected");
+    }
+
+    // Absent entirely is the same refusal, phrased for whichever key is missing.
+    for (capabilities, missing) in [
+        (json!({}), "max_velocity"),
+        (json!({ "max_velocity": 1 }), "task_interval"),
+        (json!({ "task_interval": 0.5 }), "max_velocity"),
+    ] {
+        let res = post_robot(
+            &client,
+            &base,
+            json!({ "name": unique_name(), "capabilities": capabilities }),
+        )
+        .await;
+        assert_eq!(res.status(), 400);
+        assert!(res_contains(res, missing).await);
+    }
+}
+
+#[tokio::test]
+async fn other_capabilities_survive_beside_max_velocity() {
+    let client = Client::new();
+    let base = spawn_app().await;
+
+    // `capabilities` stays free-form apart from the one key the simulator reads, so a client
+    // experimenting with footprint or kinematics is not blocked waiting for a column.
+    let body = json!({
+        "name": unique_name(),
+        "capabilities": {
+            "max_velocity": 1,
+            "task_interval": 0.5,
+            "footprint": [[0, 0], [1, 0]],
+            "turns": "holonomic",
+        },
+    });
+    let res = post_robot(&client, &base, body).await;
+    assert_eq!(res.status(), 201);
+
+    let robot: Value = res.json().await.unwrap();
+    assert_eq!(robot["capabilities"]["turns"], "holonomic");
+    assert_eq!(robot["capabilities"]["footprint"][1][0], 1);
+}
+
 // --- plans ---------------------------------------------------------------
 
+/// Plans a route across `grid_id`'s stored obstacles, for a robot created on the spot.
+///
+/// Every plan needs a driver, and most tests here are about routing rather than about which
+/// machine is doing it — so one is made to order and forgotten. A test that cares which robot
+/// drives calls [`post_plan_for_robot`] with its own.
 async fn post_plan(
     client: &Client,
     base: &str,
@@ -1450,17 +1578,28 @@ async fn post_plan(
     src: [i32; 2],
     dest: [i32; 2],
 ) -> reqwest::Response {
-    client
-        .post(format!("{base}/grids/{grid_id}/plans"))
-        .json(&json!({ "src_vertex": src, "dest_vertex": dest }))
-        .send()
+    let robot_id = make_robot(client, base, 1.0, 0.05).await;
+    post_plan_for_robot(client, base, grid_id, src, dest, robot_id).await
+}
+
+/// How many worlds have been recorded for one grid.
+///
+/// Read straight from the database: `grid_world_states` has no route of its own, and the
+/// point of these assertions is the row count rather than anything the API reports.
+async fn state_count(grid_id: i64) -> u64 {
+    use sea_orm::PaginatorTrait;
+
+    let db = db().await;
+    grid_world_states::Entity::find()
+        .filter(grid_world_states::Column::GridWorldId.eq(grid_id as i32))
+        .count(&db)
         .await
         .unwrap()
 }
 
 /// Reads a plan's cells as `(x, y)` pairs, so assertions read like the grid does.
 fn plan_cells(plan: &Value) -> Vec<(i64, i64)> {
-    plan["vertices"]
+    plan["route_vertices"]
         .as_array()
         .expect("vertices must be an array")
         .iter()
@@ -1487,8 +1626,85 @@ async fn planning_across_an_empty_grid_returns_the_direct_route() {
     assert_eq!(plan["meta"]["planner"], "a_star");
     assert_eq!(plan["meta"]["reachable"], true);
     assert_eq!(plan["meta"]["cost"], 42, "3 diagonal steps at 14 each");
-    assert_eq!(plan["meta"]["src_vertex"], json!([0, 0]));
-    assert_eq!(plan["meta"]["dest_vertex"], json!([3, 3]));
+    // Columns of their own now, not fields of `meta` — every reader needs the endpoints, and
+    // none of them should be parsing a blob to find where the route was meant to go.
+    assert_eq!(plan["src_vertex"], json!([0, 0]));
+    assert_eq!(plan["dest_vertex"], json!([3, 3]));
+    // The route names the world it was planned in rather than carrying a copy of it.
+    assert!(plan["grid_world_state_id"].is_i64());
+    assert!(plan["robot_id"].is_i64(), "every route is planned for a robot");
+}
+
+#[tokio::test]
+async fn planning_twice_on_an_unchanged_grid_reuses_one_world() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_grid(&client, &base, 10, 10, polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])))
+        .await["id"]
+        .as_i64()
+        .unwrap();
+
+    // Two different routes, same obstacles. Nothing about the world moved between them, so
+    // there is one moment here, not two.
+    let first: Value = post_plan(&client, &base, grid_id, [0, 0], [9, 9])
+        .await
+        .json()
+        .await
+        .unwrap();
+    let second: Value = post_plan(&client, &base, grid_id, [0, 9], [9, 0])
+        .await
+        .json()
+        .await
+        .unwrap();
+
+    assert_ne!(first["id"], second["id"], "two plans, not one");
+    assert_eq!(
+        first["grid_world_state_id"], second["grid_world_state_id"],
+        "unchanged obstacles should not append a second world",
+    );
+
+    // And it is the grid's opening state, not a copy of it appended alongside.
+    assert_eq!(state_count(grid_id).await, 1);
+}
+
+#[tokio::test]
+async fn planning_against_moved_obstacles_appends_a_world() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let wall = polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]]));
+    let grid_id = create_grid(&client, &base, 10, 10, wall.clone()).await["id"]
+        .as_i64()
+        .unwrap();
+
+    let before: Value = post_plan(&client, &base, grid_id, [0, 0], [9, 9])
+        .await
+        .json()
+        .await
+        .unwrap();
+
+    // The same shape one column over — the world as a tick would have left it.
+    let moved = polys(json!([[[5, 0], [5, 3], [5, 3], [5, 0]]]));
+    let mut body = route_body([0, 0], [9, 9], &moved);
+    body["robot_id"] = json!(make_robot(&client, &base, 1.0, 0.05).await);
+    let res = client
+        .post(format!("{base}/grids/{grid_id}/plans"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+    let after: Value = res.json().await.unwrap();
+
+    assert_ne!(
+        before["grid_world_state_id"], after["grid_world_state_id"],
+        "moved obstacles are a new moment and need their own world",
+    );
+    assert_eq!(state_count(grid_id).await, 2);
+
+    // The earlier plan still describes the world it was planned in.
+    let plans = list_plans(&client, &base, grid_id).await;
+    let stored = plans.iter().find(|p| p["id"] == before["id"]).unwrap();
+    assert_eq!(stored["grid_world_state_id"], before["grid_world_state_id"]);
 }
 
 #[tokio::test]
@@ -1504,7 +1720,7 @@ async fn planning_routes_around_a_saved_obstacle() {
         5,
         polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
     )
-    .await["id"]
+        .await["id"]
         .as_i64()
         .unwrap();
 
@@ -1553,7 +1769,7 @@ async fn a_new_version_plans_against_its_own_obstacles() {
             polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])),
         ),
     )
-    .await;
+        .await;
     assert_eq!(res.status(), 201);
     let v1_id = res.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
 
@@ -1594,7 +1810,7 @@ async fn an_unreachable_goal_is_a_saved_plan_with_no_cells() {
         3,
         polys(json!([[[2, 0], [2, 2], [2, 2], [2, 0]]])),
     )
-    .await["id"]
+        .await["id"]
         .as_i64()
         .unwrap();
 
@@ -1620,7 +1836,7 @@ async fn planning_from_inside_an_obstacle_is_400() {
         10,
         polys(json!([[[2, 2], [5, 2], [5, 5], [2, 5]]])),
     )
-    .await["id"]
+        .await["id"]
         .as_i64()
         .unwrap();
 
@@ -1659,7 +1875,16 @@ async fn planning_on_an_unknown_grid_is_404() {
     let client = Client::new();
     let base = spawn_app().await;
 
-    let res = post_plan(&client, &base, 999999, [0, 0], [1, 1]).await;
+    // A robot id that names nobody: the grid is resolved first, so this must still be the
+    // grid's 404 rather than the robot's.
+    let mut body = route_body([0, 0], [1, 1], &json!([]));
+    body["robot_id"] = json!(999_999);
+    let res = client
+        .post(format!("{base}/grids/999999/plans"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 404);
 }
 
@@ -1749,14 +1974,14 @@ async fn delete_plan_returns_204_and_removes_only_that_plan() {
 
     let db = db().await;
     assert!(
-        plans::Entity::find_by_id(doomed_id as i32)
+        route_plans::Entity::find_by_id(doomed_id as i32)
             .one(&db)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        plans::Entity::find_by_id(survivor_id)
+        route_plans::Entity::find_by_id(survivor_id)
             .one(&db)
             .await
             .unwrap()
@@ -1788,6 +2013,82 @@ async fn deleting_a_plan_leaves_its_grid_alone() {
     // The old nested route took a *grid* id and deleted whichever plan shared that
     // number; this pins that a plan delete never reaches across to the grid.
     assert_eq!(show_grid(&client, &base, grid_id).await["id"], grid_id);
+}
+
+#[tokio::test]
+async fn deleting_a_plan_leaves_the_world_it_was_planned_in() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_grid(&client, &base, 10, 10, polys(json!([[[4, 0], [4, 3], [4, 3], [4, 0]]])))
+        .await["id"]
+        .as_i64()
+        .unwrap();
+
+    // Two routes through the same world — the state row is shared, so removing one route
+    // must not take the ground out from under the other.
+    let doomed: Value = post_plan(&client, &base, grid_id, [0, 0], [9, 9])
+        .await
+        .json()
+        .await
+        .unwrap();
+    let survivor: Value = post_plan(&client, &base, grid_id, [0, 9], [9, 0])
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(doomed["grid_world_state_id"], survivor["grid_world_state_id"]);
+
+    let res = client
+        .delete(format!("{base}/plans/{}", doomed["id"].as_i64().unwrap()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+
+    // A world outlives the routes planned in it: the cascade runs from state to plan, never
+    // back. Deleting a route is not a claim that the moment never happened.
+    assert_eq!(state_count(grid_id).await, 1, "the world was deleted with the plan");
+    let remaining = list_plans(&client, &base, grid_id).await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["id"], survivor["id"]);
+    assert_eq!(
+        remaining[0]["grid_world_state_id"], survivor["grid_world_state_id"],
+        "the surviving route lost the world it points at",
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_world_takes_its_route_plans_with_it() {
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_empty_grid(&client, &base, 10, 10).await["id"]
+        .as_i64()
+        .unwrap();
+    let plan: Value = post_plan(&client, &base, grid_id, [0, 0], [3, 3])
+        .await
+        .json()
+        .await
+        .unwrap();
+    let state_id = plan["grid_world_state_id"].as_i64().unwrap() as i32;
+
+    // No route deletes a world, so this reaches past the API on purpose: the assertion is
+    // about the schema's cascade rather than about anything a handler does.
+    let db = db().await;
+    grid_world_states::Entity::delete_by_id(state_id)
+        .exec(&db)
+        .await
+        .unwrap();
+
+    // The other direction: a route describes a world, so a route whose world is gone is a
+    // row pointing at nothing, and goes with it.
+    assert!(
+        route_plans::Entity::find_by_id(plan["id"].as_i64().unwrap() as i32)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none(),
+        "the route outlived the world it was planned in",
+    );
 }
 
 #[tokio::test]
@@ -1826,16 +2127,52 @@ async fn set_env_interval(grid_id: i64, env: f64) {
     db.execute_unprepared(&format!(
         "update grid_worlds set sim_interval = {env} where id = {grid_id}"
     ))
-    .await
-    .unwrap();
+        .await
+        .unwrap();
 }
 
 /// A start request that names the replanner's frequency as well as the plan.
 ///
 /// The counterpart to [`set_env_interval`]: the world's clock is stored, the planner's is
 /// asked for per run, and a test that cares about the gap between them sets both.
-fn start_body(plan_id: i64, replan: f64) -> Value {
-    json!({ "plan_id": plan_id, "replan_interval": replan })
+/// The robot's cadence is its own now, so a start request carries only which plan to run.
+fn start_body(plan_id: i64) -> Value {
+    json!({ "plan_id": plan_id })
+}
+
+/// Plans a route and assigns a robot to drive it, which is what a run needs.
+async fn post_plan_for_robot(
+    client: &Client,
+    base: &str,
+    grid_id: i64,
+    src: [i32; 2],
+    dest: [i32; 2],
+    robot_id: i64,
+) -> reqwest::Response {
+    let obstacles = show_grid(client, base, grid_id).await["obs_polygons"].clone();
+    let mut body = route_body(src, dest, &obstacles);
+    body["robot_id"] = json!(robot_id);
+    client
+        .post(format!("{base}/grids/{grid_id}/plans"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A robot the fleet can actually run: a speed and a cadence, both positive.
+async fn make_robot(client: &Client, base: &str, max_velocity: f64, task_interval: f64) -> i64 {
+    let res = post_robot(
+        client,
+        base,
+        json!({
+            "name": unique_name(),
+            "capabilities": { "max_velocity": max_velocity, "task_interval": task_interval },
+        }),
+    )
+    .await;
+    assert_eq!(res.status(), 201, "robot setup should succeed");
+    res.json::<Value>().await.unwrap()["id"].as_i64().unwrap()
 }
 
 async fn post_sim_start(
@@ -1862,10 +2199,24 @@ async fn post_sim_stop(client: &Client, base: &str, grid_id: i64) -> reqwest::Re
 
 /// A grid with one wobbling obstacle, a plan across it, and the world's clock turned right up.
 async fn runnable_grid(client: &Client, base: &str, env: f64) -> (i64, i64) {
+    // Slow enough that the short runs below never finish by arrival: these tests are about
+    // schedules, and a robot that reached its goal would stop the run out from under them.
+    runnable_grid_with_robot(client, base, env, 0.1, 0.05).await
+}
+
+/// A grid with one wobbling obstacle, a robot, and a plan the robot is assigned to drive.
+async fn runnable_grid_with_robot(
+    client: &Client,
+    base: &str,
+    env: f64,
+    max_velocity: f64,
+    task_interval: f64,
+) -> (i64, i64) {
     let grid = create_grid(client, base, 10, 10, wobbly_square()).await;
     let grid_id = grid["id"].as_i64().unwrap();
+    let robot_id = make_robot(client, base, max_velocity, task_interval).await;
 
-    let res = post_plan(client, base, grid_id, [0, 0], [9, 9]).await;
+    let res = post_plan_for_robot(client, base, grid_id, [0, 0], [9, 9], robot_id).await;
     assert_eq!(res.status(), 201, "plan setup should succeed");
     let plan_id = res.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
 
@@ -1910,7 +2261,7 @@ async fn starting_a_run_reports_both_frequencies_and_the_opening_snapshot() {
     let base = spawn_app().await;
     let (grid_id, plan_id) = runnable_grid(&client, &base, 0.05).await;
 
-    let res = post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.2)).await;
+    let res = post_sim_start(&client, &base, grid_id, start_body(plan_id)).await;
     assert_eq!(res.status(), 200);
 
     let body: Value = res.json().await.unwrap();
@@ -1921,9 +2272,10 @@ async fn starting_a_run_reports_both_frequencies_and_the_opening_snapshot() {
         "the grid's column drives the world"
     );
     assert_eq!(
-        body["replan_interval"], 0.2,
-        "the request drives the planner"
+        body["robot_interval"], 0.05,
+        "the robot's own capabilities drive its cadence"
     );
+    assert_eq!(body["robot_position"], json!([0, 0]), "it starts where the plan did");
     assert_eq!(body["env_tick"], 0);
     assert_eq!(body["obs_polygons"].as_array().unwrap().len(), 1);
 
@@ -1983,11 +2335,18 @@ async fn a_run_over_scenery_alone_is_refused() {
             ],
         }]),
     )
-    .await;
+        .await;
     let grid_id = grid["id"].as_i64().unwrap();
-    let plan_id = freeze_with_plan(&client, &base, grid_id).await;
+    // A real robot, so the run gets past "who is driving?" and is refused for the reason
+    // this test is actually about.
+    let robot_id = make_robot(&client, &base, 1.0, 0.05).await;
+    let plan: Value = post_plan_for_robot(&client, &base, grid_id, [0, 0], [9, 9], robot_id)
+        .await
+        .json()
+        .await
+        .unwrap();
 
-    let res = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+    let res = post_sim_start(&client, &base, grid_id, start_body(plan["id"].as_i64().unwrap())).await;
     assert_eq!(res.status(), 400);
     assert!(res_contains(res, "dynamic").await);
 }
@@ -2013,24 +2372,117 @@ async fn an_unknown_plan_or_grid_is_404() {
 }
 
 #[tokio::test]
-async fn an_unusable_replan_interval_is_refused() {
-    // The frequency is a request field now, so a client can ask for one that would spawn a
-    // task saturating a core. Rejected before anything is spawned, and the grid is left
-    // startable rather than half-registered.
+async fn a_robot_whose_cadence_is_out_of_bounds_cannot_run() {
+    // The cadence is the robot's now, and `validate_robot` only insists it is positive — the
+    // scheduler's floor and ceiling are its own, about what this process is willing to spawn
+    // a task for. So a robot can be stored and still be unrunnable, and the refusal has to
+    // arrive at Start rather than at the form.
     let client = Client::new();
     let base = spawn_app().await;
-    let (grid_id, plan_id) = runnable_grid(&client, &base, 0.05).await;
 
-    for bad in [0.0, -1.0, 0.000_1, 99_999.0] {
-        let res = post_sim_start(&client, &base, grid_id, start_body(plan_id, bad)).await;
-        assert_eq!(res.status(), 400, "{bad} was accepted as a replan interval");
+    for bad in [0.000_1, 99_999.0] {
+        let (grid_id, plan_id) = runnable_grid_with_robot(&client, &base, 0.05, 1.0, bad).await;
+        let res = post_sim_start(&client, &base, grid_id, start_body(plan_id)).await;
+        assert_eq!(res.status(), 400, "{bad} was accepted as a robot cadence");
         assert!(res_contains(res, "is not between").await);
     }
+}
 
-    // Omitting it entirely is fine — the server has a default.
-    let res = post_sim_start(&client, &base, grid_id, json!({ "plan_id": plan_id })).await;
+#[tokio::test]
+async fn a_run_moves_the_robot_and_ends_when_it_arrives() {
+    // The point of the whole feature: the robot walks its route on its own clock, and the run
+    // ends by arrival rather than only by being stopped.
+    let client = Client::new();
+    let base = spawn_app().await;
+    // Fast enough to cross a 10x10 grid inside the window below, ticking often enough that
+    // several moves land in it.
+    let (grid_id, plan_id) = runnable_grid_with_robot(&client, &base, 0.05, 3.0, 0.02).await;
+
+    let res = post_sim_start(&client, &base, grid_id, start_body(plan_id)).await;
     assert_eq!(res.status(), 200);
-    post_sim_stop(&client, &base, grid_id).await;
+    assert_eq!(
+        res.json::<Value>().await.unwrap()["robot_position"],
+        json!([0, 0]),
+        "a run opens where its plan started",
+    );
+
+    // The stream closes when the run ends, so reading it whole blocks until arrival — no
+    // stop request is sent here, which is the assertion.
+    let body = tokio::time::timeout(
+        Duration::from_secs(10),
+        client
+            .get(format!("{base}/grids/{grid_id}/sim/stream"))
+            .send(),
+    )
+    .await
+    .expect("the stream should open")
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+
+    let positions: Vec<Value> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|payload| serde_json::from_str::<Value>(payload.trim()).ok())
+        .filter(|event| event["type"] == "plan")
+        .map(|event| event["position"].clone())
+        .collect();
+
+    assert!(
+        positions.len() > 1,
+        "the robot should have moved more than once: {positions:?}",
+    );
+    assert_ne!(
+        positions.first(),
+        positions.last(),
+        "the robot never left its start",
+    );
+    assert!(
+        body.contains("reached its goal"),
+        "the run should have ended by arrival: {body}",
+    );
+
+    // Arrival really removed the run, rather than leaving a dead task registered.
+    let res = client
+        .get(format!("{base}/grids/{grid_id}/sim"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404, "an arrived run should be gone");
+}
+
+#[tokio::test]
+async fn a_plan_needs_a_robot_to_drive_it() {
+    // Planning is robot-first: a route is computed *for* a machine, whose speed and cadence
+    // are what a run is driven by. Refused at the plan rather than at Run, so a driverless
+    // route can never be stored and discovered unrunnable later.
+    let client = Client::new();
+    let base = spawn_app().await;
+    let grid_id = create_empty_grid(&client, &base, 10, 10).await["id"]
+        .as_i64()
+        .unwrap();
+    let obstacles = show_grid(&client, &base, grid_id).await["obs_polygons"].clone();
+
+    let res = client
+        .post(format!("{base}/grids/{grid_id}/plans"))
+        .json(&route_body([0, 0], [3, 3], &obstacles))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 422, "a plan with no robot_id is not a plan");
+
+    // And an id that names nobody is a 404 rather than a foreign-key 500.
+    let mut body = route_body([0, 0], [3, 3], &obstacles);
+    body["robot_id"] = json!(999_999);
+    let res = client
+        .post(format!("{base}/grids/{grid_id}/plans"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404);
+    assert!(res_contains(res, "robot 999999 not found").await);
 }
 
 #[tokio::test]
@@ -2058,7 +2510,7 @@ async fn the_two_schedules_tick_independently_and_the_stream_says_why_it_ended()
     let base = spawn_app().await;
     let (grid_id, plan_id) = runnable_grid(&client, &base, 0.025).await;
     assert_eq!(
-        post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.15))
+        post_sim_start(&client, &base, grid_id, start_body(plan_id))
             .await
             .status(),
         200,
@@ -2086,7 +2538,7 @@ async fn a_run_stores_nothing() {
 
     let before = show_grid(&client, &base, grid_id).await;
     assert_eq!(
-        post_sim_start(&client, &base, grid_id, start_body(plan_id, 0.05))
+        post_sim_start(&client, &base, grid_id, start_body(plan_id))
             .await
             .status(),
         200,

@@ -1,8 +1,11 @@
 use crate::handlers::grid_crud::{
     create_grid, create_grid_version, delete_grid, list_grids, show_grid, update_grid,
 };
-use crate::handlers::planner_crud::{
+use crate::handlers::plan_crud::{
     delete_plan, generate_grid_plan, list_grid_plans, replan_grid,
+};
+use crate::handlers::robot_crud::{
+    create_robot, delete_robot, list_robots, show_robot, update_robot,
 };
 use crate::handlers::sim::{show_sim, start_sim, stop_sim, stream_sim};
 use crate::scheduler::SimRegistry;
@@ -60,5 +63,13 @@ pub async fn route(db: DatabaseConnection) -> Router {
         .route("/grids/{id}/sim/stop", routing::post(stop_sim))
         .route("/grids/{id}/sim/stream", routing::get(stream_sim))
         .route("/plans/{plan_id}", routing::delete(delete_plan))
+        // A robot is a spec — capabilities, no home cell — so it has no scoping parent to
+        // nest under. Tying it to a grid would pin it to one frozen snapshot and empty the
+        // fleet on the next edit; which world it is in is a property of the scenario.
+        .route("/robots", routing::get(list_robots).post(create_robot))
+        .route(
+            "/robots/{id}",
+            routing::get(show_robot).put(update_robot).delete(delete_robot),
+        )
         .with_state(state)
 }

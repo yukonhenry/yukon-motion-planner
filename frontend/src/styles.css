@@ -434,3 +434,11 @@ button.subtle {
   border-radius: 3px;
   flex: none;
 }
+
+/* The robot: filled and ringed so it stays legible on top of a route cell, which is the
+   place it spends the entire run. */
+.robot circle {
+    fill: #f9d423;
+    stroke: #1b1b1b;
+    stroke-width: 2;
+}

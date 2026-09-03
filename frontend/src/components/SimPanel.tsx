@@ -39,9 +39,11 @@ function rate(seconds: number): string {
  * on the server from that point: closing the tab does not stop the run, and reopening it
  * rejoins.
  *
- * A run is anchored to a *saved plan*, which is where its endpoints come from. That is why
- * building the grid and computing the first plan stay ordinary synchronous steps — pressing
- * Run is what sets the finished situation in motion.
+ * A run is anchored to a *saved plan*, which is where its endpoints, its opening world and —
+ * through the plan's robot — its speed and cadence all come from. That is why building the
+ * grid, defining the robot and computing the first plan stay ordinary synchronous steps:
+ * pressing Run is what sets the finished situation in motion. A run ends when the robot
+ * reaches its goal, or when it is stopped.
  */
 export function SimPanel({
                              tick,
@@ -86,18 +88,22 @@ export function SimPanel({
                 {run ? (
                     <div className="stack">
                         <p className="muted">
-                            <strong>Running</strong> · world {rate(run.envInterval)} · planner{' '}
-                            {rate(run.replanInterval)}
+                            <strong>Running</strong> · world {rate(run.envInterval)} · robot{' '}
+                            {rate(run.robotInterval)}
                         </p>
                         <p className="muted">
                             Env tick {run.envTick} · {run.moved} moved
                         </p>
                         <p className="muted">
+                            Robot at [{run.robotPosition.join(', ')}] · {run.robotMoved} cells last
+                            move
+                        </p>
+                        <p className="muted">
                             {run.route === null ? (
-                                'Waiting for the first replan…'
+                                'Waiting for the robot to move…'
                             ) : (
                                 <>
-                                    Replan {run.planTick} ·{' '}
+                                    Move {run.planTick} ·{' '}
                                     {run.reachable ? `cost ${run.cost}` : 'no route'} ·{' '}
                                     {run.elapsedMs}ms · {run.planner}
                                     {lag > 0 && ` · ${lag} tick${lag === 1 ? '' : 's'} behind`}

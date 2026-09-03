@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
-import type { Plan, Vertex } from '../types';
+import type { Plan, Vertex, WireObstacle } from '../types';
 
 /**
  * The plans stored against one grid.
@@ -43,14 +43,20 @@ export function usePlans(gridId: number | null) {
       });
   }, [gridId]);
 
+  /**
+   * Plans a route and keeps it. `obstacles` is the world it is planned through, which the
+   * saved plan records — the caller owns it, because only the caller knows whether that is
+   * the canvas or a simulation part-way through a run. `robotId` is who will drive it, and
+   * is what makes the plan runnable.
+   */
   const generate = useCallback(
-    async (src: Vertex, dest: Vertex) => {
+    async (src: Vertex, dest: Vertex, obstacles: WireObstacle[], robotId: number) => {
       if (gridId === null) return;
 
       const mine = ++ticket.current;
       setPending(true);
       try {
-        const saved = await api.generatePlan(gridId, src, dest);
+        const saved = await api.generatePlan(gridId, src, dest, obstacles, robotId);
         if (mine !== ticket.current) return;
         setPlans((current) => [...current, saved]);
         setActiveId(saved.id);

@@ -17,8 +17,14 @@ export interface SimRun {
     /** Seconds per environment tick, as the server resolved them. */
     envInterval: number;
     /** Seconds per replan. */
-    replanInterval: number;
+    /** Seconds between the robot's moves, from its own capabilities. */
+    robotInterval: number;
     planId: number;
+    robotId: number;
+    /** Where the robot is standing. */
+    robotPosition: Vertex;
+    /** How many cells it covered on the last move. */
+    robotMoved: number;
     /** Where the obstacles are now. */
     obstacles: Obstacle[];
     envTick: number;
@@ -92,6 +98,8 @@ export function useSimRun(gridId: number | null) {
                         case 'plan':
                             return {
                                 ...current,
+                                robotPosition: event.position,
+                                robotMoved: event.moved,
                                 route: event.vertices,
                                 routeEnvTick: event.env_tick,
                                 planTick: event.tick,
@@ -130,8 +138,11 @@ export function useSimRun(gridId: number | null) {
     const adoptStatus = useCallback((status: SimStatus) => {
         setRun({
             envInterval: status.env_interval,
-            replanInterval: status.replan_interval,
+            robotInterval: status.robot_interval,
             planId: status.plan_id,
+            robotId: status.robot_id,
+            robotPosition: status.robot_position,
+            robotMoved: 0,
             obstacles: status.obs_polygons.map(fromWire),
             envTick: status.env_tick,
             moved: 0,

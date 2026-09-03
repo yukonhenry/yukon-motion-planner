@@ -34,7 +34,7 @@ export function SavePanel({
                               onDiscard,
                           }: Props) {
     const action = unsaved
-        ? 'Create grid'
+        ? 'Save grid'
         : frozen
             ? `Save as v${version + 1}`
             : 'Save changes';

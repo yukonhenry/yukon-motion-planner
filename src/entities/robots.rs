@@ -15,7 +15,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub capabilities: Json, // json representation for robot capabilities during prototyping
     #[sea_orm(has_many)]
-    pub plan_robots: HasMany<super::plan_robots::Entity>,
+    pub route_plans: HasMany<super::route_plans::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

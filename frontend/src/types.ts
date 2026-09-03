@@ -126,11 +126,14 @@ export interface ReplanResult {
     planner: string;
 }
 
-/** Written by `generate_grid_plan` in src/handlers/planner_crud.rs. */
+/**
+ * Written by `generate_grid_plan` in src/handlers/plan_crud.rs.
+ *
+ * The endpoints used to live here; they are columns on `route_plans` now, so what is left is
+ * how the route was found and what it cost. See {@link Plan.src_vertex}.
+ */
 export interface PlanMeta {
     planner: string;
-    src_vertex: Vertex;
-    dest_vertex: Vertex;
     reachable: boolean;
     /**
      * Scaled by 10 so a diagonal stays an integer: an orthogonal step costs 10, a
@@ -139,11 +142,22 @@ export interface PlanMeta {
     cost: number;
 }
 
-/** Mirrors `plans::Model` in src/entities/plans.rs. */
+/** Mirrors `RoutePlanOutput` in src/handlers/plan_crud.rs. */
 export interface Plan {
     id: number;
+    /**
+     * Which grid this route crosses. Not a column: a route plan points at the *world* it was
+     * planned in, and the server resolves the grid behind it so a client that asked about a
+     * grid gets an answer in those terms.
+     */
     grid_id: number;
+    /** The world this route was planned in — the row it actually references. */
+    grid_world_state_id: number;
+    /** Who drives this route. Every plan has one — a route is planned *for* a machine. */
+    robot_id: number;
     name: string;
+    src_vertex: Vertex;
+    dest_vertex: Vertex;
     /**
      * The cells the route runs through, start first — empty when there is no route.
      *
@@ -151,8 +165,42 @@ export interface Plan {
      * error, because it is a fact about the grid rather than a bad request. Only a
      * malformed endpoint (off-grid, or inside an obstacle) is a 4xx.
      */
-    vertices: Vertex[];
+    route_vertices: Vertex[];
     meta: PlanMeta;
+}
+
+// --- robots --------------------------------------------------------------
+
+/**
+ * What a robot can do. Free-form on the wire so a new capability is a new key rather than a
+ * migration, but `max_velocity` is the one the server insists on — see `validate_robot` in
+ * src/handlers/robot_crud.rs.
+ */
+export interface RobotCapabilities {
+    /** Cells travelled per tick of the robot's own clock. Finite and greater than zero. */
+    max_velocity: number;
+    /**
+     * Seconds between one move-and-replan and the next.
+     *
+     * The robot's own clock, independent of `grid_worlds.sim_interval`: how often the world
+     * moves and how often the machine thinks are the experiment. A run reads it from here
+     * rather than from the start request, so the same robot keeps its cadence everywhere.
+     */
+    task_interval: number;
+    [key: string]: unknown;
+}
+
+/** Mirrors `robots::Model` in src/entities/robots.rs. */
+export interface Robot {
+    id: number;
+    name: string;
+    capabilities: RobotCapabilities;
+}
+
+/** Body of `POST /robots` and `PUT /robots/{id}`. */
+export interface RobotInput {
+    name: string;
+    capabilities: RobotCapabilities;
 }
 
 // --- backend-scheduled simulation ----------------------------------------
@@ -167,11 +215,20 @@ export interface Plan {
 export interface SimStatus {
     grid_id: number;
     plan_id: number;
+    /** Which robot is driving, so a client that joined late can name it. */
+    robot_id: number;
     /** Seconds between environment ticks — `grid_worlds.sim_interval`. */
     env_interval: number;
-    /** Seconds between replans, as the start request asked for it. */
-    replan_interval: number;
+    /**
+     * Seconds between the robot's moves, from its own `capabilities.task_interval`.
+     *
+     * A property of the machine rather than of the run: the same robot keeps its cadence
+     * across every experiment, instead of taking it from whoever pressed Run.
+     */
+    robot_interval: number;
     env_tick: number;
+    /** Where the robot is standing right now. */
+    robot_position: Vertex;
     obs_polygons: WireObstacle[];
     /** Where the walk is up to, for replaying a run that turned out interesting. */
     seed: number;
@@ -193,13 +250,18 @@ export type SimEvent =
 }
     | {
     type: 'plan';
-    /** The replanner's own count, independent of the environment's. */
+    /** The robot's own count, independent of the environment's. */
     tick: number;
     /**
      * Which environment tick this route was planned against. The gap to the latest
      * `environment` tick is how far the planner is running behind the world.
      */
     env_tick: number;
+    /** Where the robot is standing after this tick's move. */
+    position: Vertex;
+    /** How many cells it covered getting there; 0 means it banked a fractional step. */
+    moved: number;
+    /** The route from `position` onward, empty when the goal is walled off. */
     vertices: Vertex[];
     reachable: boolean;
     cost: number;
@@ -210,15 +272,11 @@ export type SimEvent =
 
 /** Body of `POST /grids/{id}/sim/start`. */
 export interface StartSimInput {
-    /** The plan to keep replanning; supplies the endpoints. */
-    plan_id: number;
     /**
-     * Seconds between replans. Omit for the server's default.
-     *
-     * A property of the run rather than of the plan: the same saved route watched at two
-     * frequencies is the experiment, and neither watching changes the row.
+     * The plan to run: it supplies the endpoints, the world to start from, and — through its
+     * robot — how fast and how often the machine moves. A plan with no robot is refused.
      */
-    replan_interval?: number;
+    plan_id: number;
     /** Omit to start somewhere arbitrary — the response reports where. */
     seed?: number;
 }

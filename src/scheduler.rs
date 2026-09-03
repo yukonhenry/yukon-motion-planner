@@ -1,5 +1,5 @@
-//! Backend-driven simulation: the environment and the replanner as two independently
-//! scheduled tasks, and the broadcast that tells the frontend what they did.
+//! Backend-driven simulation: the world and the robot as two independently scheduled tasks,
+//! and the broadcast that tells the frontend what they did.
 //!
 //! # The shape of a run
 //!
@@ -7,13 +7,18 @@
 //!
 //! * the **environment** task, ticking at `grid_worlds.sim_interval`, jitters every dynamic
 //!   obstacle;
-//! * the **replanner** task, ticking at the interval the run was started with, recomputes
-//!   the route against whatever the obstacles happen to be at that moment.
+//! * the **robot** task, ticking at the robot's own `task_interval`, moves the robot up to
+//!   `max_velocity` cells along its route and then replans from wherever that left it.
 //!
 //! Two tasks rather than one loop over both clocks, because the frequencies are the
-//! experiment. A planner that runs at a tenth of the world's rate should visibly lag it, and
+//! experiment. A robot that thinks at a tenth of the world's rate should visibly lag it, and
 //! a single loop would have to invent a policy for what to do when both are due — which is
 //! precisely the coupling worth not having.
+//!
+//! Both of a robot's numbers come from `robots.capabilities` rather than from the start
+//! request. The cadence is a property of the machine — how often it can afford to think —
+//! not of the person pressing Run, and a run whose speed depended on a form field would make
+//! the same robot faster in one experiment than another.
 //!
 //! # What is *not* here
 //!
@@ -33,6 +38,7 @@
 
 use crate::models::obstacle::ObstaclePoly;
 use crate::models::planners::PlannerKind;
+use crate::models::robot::{RobotBody, RobotSpec};
 use crate::models::simulation::{SimWorld, plan_route};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -71,18 +77,24 @@ pub(crate) enum SimEvent {
         moved: usize,
         obs_polygons: Vec<ObstaclePoly>,
     },
-    /// The replanner finished a search.
+    /// The robot moved, and replanned from where that left it.
     Plan {
-        /// The replanner's own count, which advances independently of `env_tick`.
+        /// The robot's own count, which advances independently of `env_tick`.
         tick: u64,
         /// Which environment tick this route was computed against. The gap between this and
         /// the latest `Environment.tick` is how far the planner is running behind the world.
         env_tick: u64,
+        /// Where the robot is standing after this tick's move, as `[x, y]`.
+        position: [i32; 2],
+        /// How many cells it covered getting there. Zero means it banked a fractional step,
+        /// or had no route to follow.
+        moved: usize,
+        /// The route from `position` onward, empty when the goal is walled off.
         vertices: Vec<(usize, usize)>,
         reachable: bool,
         cost: u32,
         planner: &'static str,
-        /// How long the search took. The reason a frequency might be the wrong one.
+        /// How long the search took. The reason a cadence might be the wrong one.
         elapsed_ms: u64,
     },
     /// The run ended. Always the last event on the stream.
@@ -103,10 +115,11 @@ impl SimEvent {
 /// A run in progress: its shared world, its subscribers, and the tasks driving it.
 struct Run {
     plan_id: i32,
+    robot_id: i32,
     world: Arc<Mutex<SimWorld>>,
     events: broadcast::Sender<SimEvent>,
     env_interval: f64,
-    replan_interval: f64,
+    robot_interval: f64,
     /// Aborted on drop — which is what makes removing a run from the registry stop it, with
     /// no separate shutdown handshake to get wrong.
     tasks: Vec<JoinHandle<()>>,
@@ -140,9 +153,14 @@ pub(crate) struct SimRegistry {
 pub(crate) struct SimStatus {
     pub(crate) grid_id: i32,
     pub(crate) plan_id: i32,
+    /// Which robot is driving, so a client that joined late can name it.
+    pub(crate) robot_id: i32,
     pub(crate) env_interval: f64,
-    pub(crate) replan_interval: f64,
+    /// Seconds between the robot's moves, from its own capabilities.
+    pub(crate) robot_interval: f64,
     pub(crate) env_tick: u64,
+    /// Where the robot is standing right now, as `[x, y]`.
+    pub(crate) robot_position: [i32; 2],
     /// The obstacles as they stand right now.
     pub(crate) obs_polygons: Vec<ObstaclePoly>,
     /// Where the walk will go next, for replaying a run that turned out to be interesting.
@@ -158,6 +176,8 @@ pub(crate) enum StartError {
     BadInterval(String),
     /// Nothing on the grid can move, so the run would tick forever changing nothing.
     NothingDynamic,
+    /// The robot is already standing on its goal, so the run has nothing left to do.
+    AlreadyArrived,
 }
 
 impl std::fmt::Display for StartError {
@@ -170,6 +190,9 @@ impl std::fmt::Display for StartError {
             StartError::NothingDynamic => f.write_str(
                 "no obstacle on this grid is marked dynamic — the environment would never change",
             ),
+            StartError::AlreadyArrived => {
+                f.write_str("the robot is already at its goal — there is nothing to run")
+            }
         }
     }
 }
@@ -201,22 +224,32 @@ impl SimRegistry {
     /// makes no decisions about *what* is being simulated, only about scheduling it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
-        &self,
+        self: &Arc<Self>,
         grid_id: i32,
         plan_id: i32,
+        robot_id: i32,
+        spec: RobotSpec,
         width: i32,
         height: i32,
         obstacles: Vec<ObstaclePoly>,
         src: [i32; 2],
         dest: [i32; 2],
+        route: Vec<(usize, usize)>,
         seed: u64,
         env_interval: f64,
-        replan_interval: f64,
     ) -> Result<SimStatus, StartError> {
         let env_period = checked_interval(env_interval, "environment")?;
-        let replan_period = checked_interval(replan_interval, "replanner")?;
+        let robot_period = checked_interval(spec.task_interval, "robot")?;
 
-        let world = SimWorld::new(width, height, obstacles, seed);
+        // The robot starts where the plan started, following the route the plan already
+        // found. So tick 0 of a run is the saved plan exactly, and the first thing that
+        // happens is a move rather than a redundant search for what is already on screen.
+        let robot = RobotBody::new(src, dest, route);
+        if robot.arrived() {
+            return Err(StartError::AlreadyArrived);
+        }
+
+        let world = SimWorld::new(width, height, obstacles, seed, robot);
         if !world.has_dynamic_obstacles() {
             return Err(StartError::NothingDynamic);
         }
@@ -236,23 +269,29 @@ impl SimRegistry {
             events.clone(),
             env_period,
         ));
-        let replanner = tokio::spawn(replanner_task(
+        let robot_task_handle = tokio::spawn(robot_task(
             Arc::clone(&world),
             events.clone(),
-            replan_period,
-            src,
-            dest,
+            robot_period,
+            spec.max_velocity,
+            grid_id,
+            // Weak, not strong: the registry owns the run, which owns this task's handle, so
+            // a strong reference back would be a cycle that never frees a finished run.
+            Arc::downgrade(self),
         ));
 
         let status = {
             let world = world.lock().expect("sim world poisoned");
             let (obs_polygons, env_tick) = world.snapshot();
+            let (robot_position, _) = world.robot_at();
             SimStatus {
                 grid_id,
                 plan_id,
+                robot_id,
                 env_interval,
-                replan_interval,
+                robot_interval: spec.task_interval,
                 env_tick,
+                robot_position,
                 obs_polygons,
                 seed: world.peek_seed(),
             }
@@ -262,19 +301,21 @@ impl SimRegistry {
             grid_id,
             Run {
                 plan_id,
+                robot_id,
                 world,
                 events,
                 env_interval,
-                replan_interval,
-                tasks: vec![environment, replanner],
+                robot_interval: spec.task_interval,
+                tasks: vec![environment, robot_task_handle],
             },
         );
 
         tracing::info!(
             grid_id,
             plan_id,
+            robot_id,
             env_interval,
-            replan_interval,
+            robot_interval = spec.task_interval,
             "simulation started"
         );
         Ok(status)
@@ -317,12 +358,15 @@ impl SimRegistry {
         let run = runs.get(&grid_id)?;
         let world = run.world.lock().expect("sim world poisoned");
         let (obs_polygons, env_tick) = world.snapshot();
+        let (robot_position, _) = world.robot_at();
         Some(SimStatus {
             grid_id,
             plan_id: run.plan_id,
+            robot_id: run.robot_id,
             env_interval: run.env_interval,
-            replan_interval: run.replan_interval,
+            robot_interval: run.robot_interval,
             env_tick,
+            robot_position,
             obs_polygons,
             seed: world.peek_seed(),
         })
@@ -370,17 +414,23 @@ async fn environment_task(
     }
 }
 
-/// Replans against the world as it stands, once per replanner interval.
-async fn replanner_task(
+/// Moves the robot, then replans from where that left it, once per robot interval.
+///
+/// Move *then* plan, in that order, because the plan the robot is following is the one it was
+/// given last tick: it walks the route it already trusts, and only then asks what the world
+/// looks like from its new cell. Planning first would replan from a position the robot is
+/// about to leave.
+async fn robot_task(
     world: Arc<Mutex<SimWorld>>,
     events: broadcast::Sender<SimEvent>,
     period: Duration,
-    src: [i32; 2],
-    dest: [i32; 2],
+    max_velocity: f64,
+    grid_id: i32,
+    registry: std::sync::Weak<SimRegistry>,
 ) {
     let mut ticker = ticker(period);
-    // The initial plan is already on screen — it is what the run was started from — so the
-    // first *re*plan is one period in.
+    // The starting plan is already on screen — it is what the run was started from — so the
+    // first move belongs one period in.
     ticker.tick().await;
 
     let mut tick = 0u64;
@@ -388,32 +438,55 @@ async fn replanner_task(
         ticker.tick().await;
         tick += 1;
 
-        let (obstacles, env_tick, width, height) = {
-            let world = world.lock().expect("sim world poisoned");
+        // One critical section for the move and the read, so the position reported is exactly
+        // the one the route below was planned from.
+        let (moved, position, arrived, obstacles, env_tick, width, height) = {
+            let mut world = world.lock().expect("sim world poisoned");
+            let moved = world.robot_mut().advance(max_velocity);
+            let (position, arrived) = world.robot_at();
             let (obstacles, env_tick) = world.snapshot();
-            (obstacles, env_tick, world.width, world.height)
+            (moved, position, arrived, obstacles, env_tick, world.width, world.height)
         };
+
+        // Arrival ends the run rather than leaving it ticking over a robot with nowhere to
+        // go. Stopping through the registry — not by returning — is what also takes the
+        // environment task down and tells subscribers why.
+        if arrived {
+            if let Some(registry) = registry.upgrade() {
+                registry.stop(grid_id, "the robot reached its goal");
+            }
+            return;
+        }
 
         // A search is CPU-bound and unbounded in principle, so it goes to the blocking pool
         // rather than parking a runtime worker — otherwise one large grid would stall every
         // other run's environment along with it.
         let started = std::time::Instant::now();
+        let dest = {
+            let world = world.lock().expect("sim world poisoned");
+            world.robot_dest()
+        };
         let outcome = tokio::task::spawn_blocking(move || {
             // D* Lite specifically: replanning a world that just changed is what it is for.
-            // It still plans from scratch per tick — making it incremental means keeping the
-            // planner itself in `SimWorld` across ticks, which is the natural next step now
-            // that a run finally has somewhere to keep state.
-            plan_route(width, height, &obstacles, src, dest, PlannerKind::DStarLite)
+            plan_route(width, height, &obstacles, position, dest, PlannerKind::DStarLite)
         })
-            .await;
+        .await;
 
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         match outcome {
             Ok(Ok(route)) => {
+                // The robot follows what was just found, so next tick's move walks this route
+                // rather than one computed from a cell it has already left.
+                {
+                    let mut world = world.lock().expect("sim world poisoned");
+                    world.robot_mut().follow(route.vertices.clone());
+                }
                 let _ = events.send(SimEvent::Plan {
                     tick,
                     env_tick,
+                    position,
+                    moved,
                     vertices: route.vertices,
                     reachable: route.reachable,
                     cost: route.cost,
@@ -421,17 +494,16 @@ async fn replanner_task(
                     elapsed_ms,
                 });
             }
-            // The endpoints were legal when the run started and cannot move, so this means an
-            // obstacle has drifted over the start or the goal. Reported once per tick rather
-            // than ending the run: the obstacle may well drift off again.
+            // The endpoints were legal when the run started, so this means an obstacle has
+            // drifted over the robot or the goal. Reported once per tick rather than ending
+            // the run: the obstacle may well drift off again, and the robot simply waits.
             Ok(Err(err)) => {
-                tracing::debug!("replan tick {tick} could not plan: {err}");
+                tracing::debug!("robot tick {tick} could not plan: {err}");
             }
             // The blocking task panicked, or was cancelled by a stop landing mid-search.
             Err(err) => {
-                if !err.is_cancelled() {
-                    tracing::error!("replan tick {tick} panicked: {err}");
-                }
+                tracing::debug!("robot tick {tick} did not finish: {err}");
+                return;
             }
         }
     }
@@ -456,23 +528,40 @@ mod tests {
         }
     }
 
+    /// A robot fast enough to be interesting but too slow to finish the short runs below,
+    /// so a test about clocks is never cut short by an arrival.
+    fn spec(task_interval: f64) -> RobotSpec {
+        RobotSpec {
+            max_velocity: 1.0,
+            task_interval,
+        }
+    }
+
+    /// A route that goes nowhere near the goal, so the robot has somewhere to walk without
+    /// arriving and stopping the run mid-test.
+    fn stroll() -> Vec<(usize, usize)> {
+        vec![(0, 0), (1, 0), (2, 0)]
+    }
+
     fn start(
-        registry: &SimRegistry,
+        registry: &Arc<SimRegistry>,
         grid_id: i32,
         env: f64,
-        replan: f64,
+        robot: f64,
     ) -> Result<SimStatus, StartError> {
         registry.start(
             grid_id,
             1,
+            1,
+            spec(robot),
             10,
             10,
             vec![square(true)],
             [0, 0],
             [9, 9],
+            stroll(),
             42,
             env,
-            replan,
         )
     }
 
@@ -480,7 +569,7 @@ mod tests {
     async fn a_second_run_on_one_grid_is_refused() {
         // Two runs over one grid would be two sets of obstacles both claiming to be that
         // world — and the second would silently orphan the first one's subscribers.
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         assert!(start(&registry, 1, 1.0, 1.0).is_ok());
         assert!(matches!(
             start(&registry, 1, 1.0, 1.0),
@@ -492,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_frees_the_grid_to_run_again() {
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         assert!(start(&registry, 1, 1.0, 1.0).is_ok());
         assert!(registry.stop(1, "test"));
         assert!(!registry.stop(1, "test"), "stopped twice");
@@ -502,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn an_unusable_interval_is_refused_before_a_task_is_spawned() {
         // Nothing is registered on failure, so a rejected start leaves the grid startable.
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         for bad in [0.0, -1.0, f64::NAN, 0.000_1, 99_999.0] {
             assert!(
                 matches!(
@@ -520,17 +609,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_over_scenery_alone_is_refused() {
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         let result = registry.start(
             1,
             1,
+            1,
+            spec(1.0),
             10,
             10,
             vec![square(false)],
             [0, 0],
             [9, 9],
+            stroll(),
             42,
-            1.0,
             1.0,
         );
         assert!(matches!(result, Err(StartError::NothingDynamic)));
@@ -540,7 +631,7 @@ mod tests {
     async fn the_two_clocks_advance_independently() {
         // The whole point of the feature: a fast world under a slow planner. Over the same
         // stretch of time the environment must produce strictly more events than the planner.
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         let mut stream = {
             start(&registry, 1, 0.02, 0.2).expect("startable");
             registry.subscribe(1).expect("running")
@@ -567,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn subscribers_are_told_why_the_stream_ended() {
         // Otherwise a client cannot tell a deliberate stop from the server falling over.
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         start(&registry, 1, 0.02, 0.02).expect("startable");
         let mut stream = registry.subscribe(1).expect("running");
         registry.stop(1, "the user pressed stop");
@@ -585,7 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_run_has_no_status_and_no_stream() {
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         start(&registry, 1, 1.0, 1.0).expect("startable");
         assert!(registry.status(1).is_some());
         registry.stop(1, "test");
@@ -597,7 +688,7 @@ mod tests {
     async fn the_environment_actually_moves_the_world() {
         // Guards the wiring between the task and the shared world: a run whose tasks held
         // their own copy would emit events forever while `status` never changed.
-        let registry = SimRegistry::new();
+        let registry = Arc::new(SimRegistry::new());
         let before = start(&registry, 1, 0.02, 60.0).expect("startable");
 
         let mut stream = registry.subscribe(1).expect("running");

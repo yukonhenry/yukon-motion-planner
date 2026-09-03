@@ -3,6 +3,6 @@
 pub mod prelude;
 
 pub mod grid_worlds;
-pub mod plan_robots;
-pub mod plans;
+pub mod grid_world_states;
 pub mod robots;
+pub mod route_plans;

@@ -3,15 +3,17 @@ import * as api from './api';
 import {GridCanvas} from './components/GridCanvas';
 import {GridPicker} from './components/GridPicker';
 import {ObstacleList} from './components/ObstacleList';
+import {RobotPanel} from './components/RobotPanel';
 import {RoutePanel} from './components/RoutePanel';
 import {SavePanel} from './components/SavePanel';
 import {SimPanel} from './components/SimPanel';
 import {MIN_VERTICES, validateObstacles, validateVertices} from './geometry';
 import {draftToInput, fromWire, toWire, useGridDraft} from './hooks/useGridDraft';
 import {useGrids} from './hooks/useGrids';
+import {useRobots} from './hooks/useRobots';
 import {usePlans} from './hooks/usePlans';
 import {useSimRun} from './hooks/useSimRun';
-import type {Endpoint, Obstacle, Vertex} from './types';
+import type {Endpoint, Obstacle, RobotInput, Vertex} from './types';
 
 const NO_ENDPOINTS: Record<Endpoint, Vertex | null> = {src: null, dest: null};
 
@@ -44,6 +46,14 @@ export default function App() {
     const [pencil, setPencil] = useState<Vertex[] | null>(null);
     const [endpoints, setEndpoints] = useState(NO_ENDPOINTS);
     const [picking, setPicking] = useState<Endpoint | null>(null);
+    /**
+     * Which robot the next plan is for, or `null` before one has been chosen.
+     *
+     * Held here rather than in the route panel because it outlives one plan: a user comparing
+     * two routes for the same machine should not have to reselect it each time. Planning is
+     * refused until it is set — a route is computed *for* a machine.
+     */
+    const [driverId, setDriverId] = useState<number | null>(null);
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState<string | null>(null);
     /** Off by default: it is a debugging view, and it hides the grid lines underneath. */
@@ -60,6 +70,8 @@ export default function App() {
     const [stepping, setStepping] = useState(false);
 
     const plans = usePlans(gridId);
+    // Unscoped: the fleet is the same list whatever grid is on screen.
+    const robots = useRobots();
     /**
      * The backend-scheduled run, which is a different thing from `sim` above.
      *
@@ -89,6 +101,18 @@ export default function App() {
         () => grids.grids.find((g) => g.id === gridId) ?? null,
         [grids.grids, gridId],
     );
+
+    /**
+     * The obstacles a request is planned against: a manual run's if one is going, else the
+     * working copy's. `null` while there is no world yet — no grid chosen, or one still loading.
+     *
+     * Deliberately not defaulted to `[]`, unlike {@link shownObstacles}. Drawing nothing is
+     * harmless; *sending* nothing is a claim the server takes at its word — a plan records the
+     * obstacles it was computed against, so falling through to "no obstacles" would store a
+     * route running straight through a wall as evidence the wall was never there. "Not loaded
+     * yet" and "nothing in the way" are different answers, and only one is safe to send.
+     */
+    const world = useMemo(() => sim?.obstacles ?? draft?.obstacles ?? null, [sim, draft]);
 
     const resetInteraction = useCallback(() => {
         setSelectedId(null);
@@ -237,7 +261,7 @@ export default function App() {
      * obstacles now on the canvas.
      */
     const shown = useMemo(() => {
-        const planned = !dirty && plans.active ? plans.active.meta : null;
+        const planned = !dirty && plans.active ? plans.active : null;
         return {
             src: endpoints.src ?? planned?.src_vertex ?? null,
             dest: endpoints.dest ?? planned?.dest_vertex ?? null,
@@ -245,9 +269,9 @@ export default function App() {
     }, [endpoints, dirty, plans.active]);
 
     const generateRoute = useCallback(() => {
-        if (!shown.src || !shown.dest) return;
-        void plans.generate(shown.src, shown.dest);
-    }, [shown, plans]);
+        if (!shown.src || !shown.dest || !world || driverId === null) return;
+        void plans.generate(shown.src, shown.dest, world.map(toWire), driverId);
+    }, [shown, plans, world, driverId]);
 
     const clearRoute = useCallback(() => {
         setEndpoints(NO_ENDPOINTS);
@@ -301,7 +325,7 @@ export default function App() {
      */
     const marks =
         live.run && anchorPlan
-            ? {src: anchorPlan.meta.src_vertex, dest: anchorPlan.meta.dest_vertex}
+            ? {src: anchorPlan.src_vertex, dest: anchorPlan.dest_vertex}
             : shown;
 
     const startRun = useCallback(() => {
@@ -319,21 +343,23 @@ export default function App() {
     const stepBlocked =
         savedGrid === null
             ? 'Save the grid first — a run needs a stored grid to size itself against.'
-            : !shown.src || !shown.dest
-              ? 'Place a start and a goal first.'
-              : dirty && sim === null
-                ? 'Save or revert the pending edits first.'
-                : null;
+            : world === null
+              ? 'The grid is still loading.'
+              : !shown.src || !shown.dest
+                ? 'Place a start and a goal first.'
+                : dirty && sim === null
+                  ? 'Save or revert the pending edits first.'
+                  : null;
 
     const step = useCallback(async () => {
-        if (!savedGrid || !shown.src || !shown.dest) return;
+        if (!savedGrid || !shown.src || !shown.dest || !world) return;
         setStepping(true);
         setSaveError(null);
         try {
             const result = await api.replan(savedGrid.id, {
                 src_vertex: shown.src,
                 dest_vertex: shown.dest,
-                obs_polygons: (sim?.obstacles ?? draft?.obstacles ?? []).map(toWire),
+                obs_polygons: world.map(toWire),
                 // Absent on the first tick, so the server picks a starting seed; chained after.
                 seed: sim?.seed,
             });
@@ -352,7 +378,7 @@ export default function App() {
         } finally {
             setStepping(false);
         }
-    }, [savedGrid, shown, sim, draft]);
+    }, [savedGrid, shown, sim, world]);
 
     /** Drops the run. The draft was never touched, so the canvas snaps back to the saved shapes. */
     const resetSim = useCallback(() => {
@@ -386,7 +412,15 @@ export default function App() {
     }, [selectedId, removeObstacle]);
 
     // Saving is the most recent thing the user asked for, so its failure wins the slot.
-    const status = saveError ?? live.error ?? plans.error ?? draftState.error ?? grids.error;
+    const saveRobot = useCallback(
+        (input: RobotInput, editing: number | null) => {
+            void (editing === null ? robots.create(input) : robots.update(editing, input));
+        },
+        [robots],
+    );
+
+    const status =
+        saveError ?? live.error ?? plans.error ?? robots.error ?? draftState.error ?? grids.error;
 
     return (
         <div className="app">
@@ -401,6 +435,13 @@ export default function App() {
                     onDelete={deleteGrid}
                     composing={unsaved}
                     frozen={frozen}
+                />
+
+                <RobotPanel
+                    robots={robots.robots}
+                    pending={robots.pending}
+                    onSave={saveRobot}
+                    onDelete={(id) => void robots.remove(id)}
                 />
 
                 {draft && (
@@ -468,6 +509,9 @@ export default function App() {
                         active={plans.active}
                         onShow={plans.show}
                         onDelete={(id) => void plans.remove(id)}
+                        robots={robots.robots}
+                        driverId={driverId}
+                        onPickDriver={setDriverId}
                         blocked={dirty && !unsaved}
                         frozen={frozen}
                         unsaved={unsaved}
@@ -558,13 +602,16 @@ export default function App() {
                         // right thing to show against tick 0 rather than a blank canvas.
                         route={
                             live.run
-                                ? (live.run.route ?? anchorPlan?.vertices ?? null)
+                                ? (live.run.route ?? anchorPlan?.route_vertices ?? null)
                                 : sim
                                   ? sim.route
                                   : dirty
                                     ? null
-                                    : (plans.active?.vertices ?? null)
+                                    : (plans.active?.route_vertices ?? null)
                         }
+                        // Only a backend run has a robot: the manual Step clock moves
+                        // obstacles, not machines.
+                        robot={live.run?.robotPosition ?? null}
                         showFootprint={showFootprint}
                     />
                 )}

@@ -4,29 +4,26 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
-// Eq Derive macro not supported because of f64 attribute
+// Eq Derive macro not supported because of Json attribute
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "plans")]
+#[sea_orm(table_name = "grid_world_states")]
 pub struct Model {
     #[sea_orm(primary_key)]
     #[serde(skip_deserializing)]
     pub id: i32,
-    pub grid_id: i32,
-    pub name: String,
+    pub grid_world_id: i32,
     #[sea_orm(column_type = "JsonBinary")]
-    pub vertices: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub meta: Json,
+    pub obs_polygons: Json,
+    pub timestamp: DateTimeWithTimeZone,
+    pub sequence_id: i32,
     #[sea_orm(
         belongs_to,
-        from = "grid_id",
+        from = "grid_world_id",
         to = "id",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
     pub grids: BelongsTo<super::grid_worlds::Entity>,
-    #[sea_orm(has_many)]
-    pub plan_robots: HasMany<super::plan_robots::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

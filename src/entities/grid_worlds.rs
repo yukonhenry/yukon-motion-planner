@@ -14,11 +14,10 @@ pub struct Model {
     pub name: String,
     pub width: i32,
     pub height: i32,
-    pub obs_polygons: Json,
     pub version: i32,
     pub sim_interval: f64,
     #[sea_orm(has_many)]
-    pub plans: HasMany<super::plans::Entity>,
+    pub states: HasMany<super::grid_world_states::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

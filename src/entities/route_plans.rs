@@ -6,27 +6,33 @@ use serde::{Deserialize, Serialize};
 #[sea_orm::model]
 // Eq Derive macro not supported because of Json attribute
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "plan_robots")]
+#[sea_orm(table_name = "route_plans")]
 pub struct Model {
     #[sea_orm(primary_key)]
     #[serde(skip_deserializing)]
     pub id: i32,
-    pub plan_id: i32,
+    pub name: String,
+    pub grid_world_state_id: i32,
     pub robot_id: i32,
-    /// `[x, y]` — where this robot enters this plan.
+    /// `[x, y]` — where this route starts.
     #[sea_orm(column_type = "JsonBinary")]
-    pub start_vertex: Json,
-    /// `[x, y]`, or null for a robot with nowhere in particular to be.
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub goal_vertex: Option<Json>,
+    pub src_vertex: Json,
+    /// `[x, y]` — where it is headed.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub dest_vertex: Json,
+    /// The cells the route runs through, start first — empty when the goal is unreachable.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub route_vertices: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub meta: Json,
     #[sea_orm(
         belongs_to,
-        from = "plan_id",
+        from = "grid_world_state_id",
         to = "id",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    pub plan: BelongsTo<super::plans::Entity>,
+    pub grid_world_state: BelongsTo<super::grid_world_states::Entity>,
     #[sea_orm(
         belongs_to,
         from = "robot_id",
@@ -34,7 +40,7 @@ pub struct Model {
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    pub robot: BelongsTo<super::robots::Entity>,
+    pub robots: BelongsTo<super::robots::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
