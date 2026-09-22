@@ -14,7 +14,8 @@ use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::obstacle::{ObstaclePoly, advance_one_tick, footprint};
 use crate::models::robot::RobotBody;
-use crate::models::planners::{PlanError, PlannerKind};
+use crate::models::planners::{PlanError, PlannerContext, PlannerKind};
+use crate::models::scale::inflation_cells;
 use crate::models::rng::Xorshift;
 
 /// Everything a run mutates: where the obstacles are, and where the random walk is up to.
@@ -176,6 +177,40 @@ pub(crate) struct RouteOutcome {
 /// An unreachable goal is a `RouteOutcome` with no cells rather than an error: an obstacle
 /// sealing the goal off is an expected outcome of a run, and the caller wants to see it
 /// happen and keep going. Only a malformed endpoint is an `Err`.
+/// Grows every blocked region by `cells` in each direction, turning the world into the robot's
+/// configuration space.
+///
+/// Once the obstacles carry the robot's radius, a *point* searching this grid is an exact model
+/// of the body searching the original one — which is what lets a grid planner and a
+/// kinodynamic planner be compared, rather than quietly solving different problems. See
+/// [`inflation_cells`](crate::models::scale::inflation_cells) for where the number comes from;
+/// at the current scale it is zero for the default robot, and this is a no-op.
+///
+/// Reads the blocked set out before writing any of it back, because dilating in place would
+/// feed freshly-inflated cells back into the same pass and grow the obstacle without bound.
+fn inflate(grid_world: &mut GridWorldManager<Cell>, cells: i32) {
+    if cells <= 0 {
+        return;
+    }
+
+    let blocked: Vec<(usize, usize)> = grid_world
+        .iter()
+        .filter(|(_, cell)| cell.blocked)
+        .map(|(id, _)| grid_world.xy(id))
+        .collect();
+
+    for (x, y) in blocked {
+        for dy in -cells..=cells {
+            for dx in -cells..=cells {
+                let (nx, ny) = (x as isize + dx as isize, y as isize + dy as isize);
+                if let Some(id) = grid_world.try_id(nx, ny) {
+                    grid_world[id].blocked = true;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn plan_route(
     width: i32,
     height: i32,
@@ -183,12 +218,23 @@ pub(crate) fn plan_route(
     src: [i32; 2],
     dest: [i32; 2],
     kind: PlannerKind,
+    context: PlannerContext,
 ) -> Result<RouteOutcome, PlanError> {
     let mut grid_world = GridWorldManager::<Cell>::new(width as usize, height as usize);
     let polygons: Vec<Vec<[i32; 2]>> = obstacles.iter().map(ObstaclePoly::cells).collect();
     grid_world.rasterize_polygons(&polygons, |cell| cell.blocked = true);
 
-    let mut planner = kind.planner();
+    // Clearance is the planner's to ask for, not the caller's to remember: a point searcher
+    // needs it baked into the world, and one that sweeps a real body would be paying for the
+    // same radius twice. Deciding it here means neither caller can get the pairing wrong.
+    if kind.inflates_obstacles() {
+        let clearance = context
+            .robot
+            .map_or(0, |robot| inflation_cells(robot.radius()));
+        inflate(&mut grid_world, clearance);
+    }
+
+    let mut planner = kind.planner(context);
     let route = match grid_world.find_plan(src, dest, planner.as_mut()) {
         Ok(route) => route,
         Err(PlanError::Unreachable) => Vec::new(),
@@ -207,6 +253,36 @@ pub(crate) fn plan_route(
 mod tests {
     use super::*;
     use crate::models::obstacle::CellVertex;
+    use crate::models::robots::unicycle_spec::UnicycleSpec;
+    use crate::models::scale::METERS_PER_CELL;
+
+    /// The manual-replan context: nothing to clear obstacles by.
+    fn no_robot() -> PlannerContext {
+        PlannerContext {
+            robot: None,
+            seed: 0,
+        }
+    }
+
+    /// A robot whose radius rounds to exactly `clearance` cells of inflation.
+    ///
+    /// Built backwards from the wanted clearance rather than from a plausible machine, because
+    /// these tests are about what inflation does to a search and the robot is only how it gets
+    /// asked for. See `inflation_cells` for the half-cell the radius has to clear first.
+    fn robot_clearing(clearance: i32) -> PlannerContext {
+        let radius = if clearance <= 0 {
+            0.1
+        } else {
+            METERS_PER_CELL * (clearance as f64 - 0.5) + METERS_PER_CELL / 2.0 + 1e-9
+        };
+        PlannerContext {
+            robot: Some(UnicycleSpec {
+                track_width: radius * 2.0,
+                ..UnicycleSpec::default()
+            }),
+            seed: 0,
+        }
+    }
 
     /// A robot that is not the subject of these tests: `SimWorld` needs one, but nothing here
     /// moves it, so it sits at the origin with somewhere else to be.
@@ -284,16 +360,155 @@ mod tests {
                 CellVertex { x: 0, y: 4 },
             ],
         };
-        let outcome = plan_route(10, 10, &[wall], [0, 0], [9, 9], PlannerKind::DStarLite)
+        let outcome = plan_route(10, 10, &[wall], [0, 0], [9, 9], PlannerKind::DStarLite, no_robot())
             .expect("legal ends");
         assert!(!outcome.reachable);
         assert!(outcome.vertices.is_empty());
     }
 
     #[test]
+    fn clearance_seals_a_gap_too_narrow_for_the_body_to_fit_through() {
+        // What inflation buys, stated as the behavior rather than as a cell count: a pillar
+        // leaving a one-cell doorway is a route for a point and a wall for anything wider
+        // than the doorway. Without this the planner hands a fat robot a path through a gap
+        // it would wedge in, and the run only discovers it by driving into the shape.
+        //
+        // Two pillars leaving a single free cell at x == 4 on row 4.
+        let pillar = |id: i32, x0: i32, x1: i32| ObstaclePoly {
+            id,
+            dynamic: false,
+            velocity: [0, 0],
+            vertices: vec![
+                CellVertex { x: x0, y: 4 },
+                CellVertex { x: x1, y: 4 },
+                CellVertex { x: x1, y: 5 },
+                CellVertex { x: x0, y: 5 },
+                CellVertex { x: x0, y: 4 },
+            ],
+        };
+        let wall = [pillar(1, 0, 3), pillar(2, 5, 9)];
+        let plan = |clearance| {
+            plan_route(10, 10, &wall, [0, 0], [9, 9], PlannerKind::DStarLite, robot_clearing(clearance))
+                .expect("legal ends")
+        };
+
+        // A point robot walks through the doorway.
+        let open = plan(0);
+        assert!(open.reachable, "a point should fit through a one-cell gap");
+        assert!(
+            open.vertices.contains(&(4, 4)),
+            "the only way through is the gap itself, got {:?}",
+            open.vertices,
+        );
+
+        // A body needing a cell of clearance does not: inflating both pillars closes the gap
+        // from either side, and the goal is genuinely unreachable rather than merely dearer.
+        let sealed = plan(1);
+        assert!(!sealed.reachable, "a one-cell gap cannot pass a body that needs one cell either side");
+        assert!(sealed.vertices.is_empty());
+    }
+
+    #[test]
+    fn only_the_point_searchers_are_handed_inflated_obstacles() {
+        // `PlannerKind::inflates_obstacles` is a flag; this is `plan_route` obeying it. Without
+        // that the kinodynamic planner clears the robot's radius twice — once in the grid it is
+        // given, once by sweeping the body — and quietly seals gaps the robot fits through.
+        //
+        // Read off the endpoint checks rather than off a route, so it is exact and costs no
+        // search at all. A wall one cell wide at x = 5, a start beside it, and a goal inside
+        // it: `find_plan` tests src before dest, so which error comes back says which world
+        // the planner was handed.
+        let wall = ObstaclePoly {
+            id: 1,
+            dynamic: false,
+            velocity: [0, 0],
+            vertices: vec![
+                CellVertex { x: 5, y: 0 },
+                CellVertex { x: 5, y: 9 },
+                CellVertex { x: 5, y: 9 },
+                CellVertex { x: 5, y: 0 },
+            ],
+        };
+        // Radius 0.6 m, which is one cell of inflation: enough to swallow the start.
+        let context = PlannerContext {
+            robot: Some(UnicycleSpec {
+                track_width: 1.2,
+                ..UnicycleSpec::default()
+            }),
+            seed: 0,
+        };
+        let plan = |kind| plan_route(10, 10, &[wall.clone()], [4, 1], [5, 5], kind, context);
+
+        assert_eq!(
+            plan(PlannerKind::DStarLite).err(),
+            Some(PlanError::SrcBlocked),
+            "a point searcher should have had the wall grown over its start",
+        );
+        assert_eq!(
+            plan(PlannerKind::Sst).err(),
+            Some(PlanError::DestBlocked),
+            "SST was handed inflated obstacles: its start should still be clear, \
+             leaving the goal inside the wall as the first real problem",
+        );
+    }
+
+    #[test]
+    fn clearance_keeps_a_route_that_is_merely_dearer() {
+        // The other half: inflation must not turn every obstacle into a wall. A pillar in
+        // open ground still leaves a way round, just a longer one.
+        let pillar = ObstaclePoly {
+            id: 1,
+            dynamic: false,
+            velocity: [0, 0],
+            vertices: vec![
+                CellVertex { x: 4, y: 4 },
+                CellVertex { x: 5, y: 4 },
+                CellVertex { x: 5, y: 5 },
+                CellVertex { x: 4, y: 5 },
+                CellVertex { x: 4, y: 4 },
+            ],
+        };
+        let plan = |clearance| {
+            plan_route(20, 20, &[pillar.clone()], [0, 0], [19, 19], PlannerKind::DStarLite, robot_clearing(clearance))
+                .expect("legal ends")
+        };
+
+        let (tight, roomy) = (plan(0), plan(2));
+        assert!(roomy.reachable, "a pillar in open ground is not a wall");
+        assert!(
+            roomy.cost >= tight.cost,
+            "giving the robot room can only cost more, not less: {} < {}",
+            roomy.cost,
+            tight.cost,
+        );
+    }
+
+    #[test]
+    fn inflating_does_not_grow_an_obstacle_without_bound() {
+        // Dilating in place would feed each freshly-blocked cell back into the same pass and
+        // swallow the grid. Pinned by the reachability of a corner far from the only shape:
+        // a runaway inflation blocks it, a correct one leaves it untouched.
+        let pillar = ObstaclePoly {
+            id: 1,
+            dynamic: false,
+            velocity: [0, 0],
+            vertices: vec![
+                CellVertex { x: 5, y: 5 },
+                CellVertex { x: 6, y: 5 },
+                CellVertex { x: 6, y: 6 },
+                CellVertex { x: 5, y: 6 },
+                CellVertex { x: 5, y: 5 },
+            ],
+        };
+        let outcome = plan_route(20, 20, &[pillar], [0, 0], [19, 19], PlannerKind::DStarLite, robot_clearing(3))
+            .expect("legal ends");
+        assert!(outcome.reachable, "inflation swallowed the grid");
+    }
+
+    #[test]
     fn a_malformed_endpoint_is_still_an_error() {
         // The line between "the world did this" and "you asked for something impossible".
-        let result = plan_route(10, 10, &[], [0, 0], [99, 99], PlannerKind::DStarLite);
+        let result = plan_route(10, 10, &[], [0, 0], [99, 99], PlannerKind::DStarLite, no_robot());
         assert_eq!(result.err(), Some(PlanError::DestOffGrid));
     }
 

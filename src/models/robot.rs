@@ -6,7 +6,8 @@
 //! where the untyped blob becomes the two numbers a run needs, once, at the point a run is
 //! being set up rather than in its hot loop.
 
-use serde::Deserialize;
+use crate::models::robots::unicycle_spec::{MAX_LINEAR_VEL, UnicycleSpec};
+use crate::models::scale::METERS_PER_CELL;
 
 /// Cells travelled per tick of the robot's own clock.
 pub const MAX_VELOCITY: &str = "max_velocity";
@@ -14,9 +15,17 @@ pub const MAX_VELOCITY: &str = "max_velocity";
 pub const TASK_INTERVAL: &str = "task_interval";
 
 /// The capabilities a run reads, pulled out of `robots.capabilities`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct RobotSpec {
     /// How far the robot gets per tick of its own clock, in cells *along its route*.
+    ///
+    /// **Derived, not stored.** The machine's real speed is
+    /// [`body.max_linear_vel`](UnicycleSpec::max_linear_vel) in m/s; this is that speed
+    /// expressed in the grid's units, via
+    /// [`METERS_PER_CELL`](crate::models::scale::METERS_PER_CELL) and
+    /// [`task_interval`](Self::task_interval). Keeping a stored `max_velocity` beside a stored
+    /// `max_linear_vel` would be the same fact twice, free to disagree, with nothing to say
+    /// which one the robot actually obeys.
     ///
     /// Route steps rather than Euclidean distance, so a diagonal counts as one the same as an
     /// orthogonal step does. That is a simplification and a visible one — a robot crossing a
@@ -27,6 +36,12 @@ pub struct RobotSpec {
     /// How often the robot moves and replans, in seconds. Independent of
     /// `grid_worlds.sim_interval`: the world's clock and the robot's are the experiment.
     pub task_interval: f64,
+    /// The physical machine: its speed and acceleration limits, and how wide it is.
+    ///
+    /// The single source of truth for what the robot can do. A kinodynamic planner integrates
+    /// it directly; the grid planners get [`max_velocity`](Self::max_velocity) derived from
+    /// it, and clear obstacles by [`radius`](UnicycleSpec::radius).
+    pub body: UnicycleSpec,
 }
 
 /// Why a robot's capabilities cannot drive a run.
@@ -36,6 +51,12 @@ pub enum SpecError {
     Missing(&'static str),
     /// Present and numeric, but not a speed or a period — zero, negative, or not finite.
     NotPositive(&'static str, f64),
+    /// Present and numeric, but outside the range that key allows.
+    ///
+    /// Separate from [`NotPositive`](Self::NotPositive) because not every bound is "greater
+    /// than zero": `min_linear_vel` is a reverse speed and has to be *non-positive*, and
+    /// reporting that as "must be positive" would send the reader to fix the wrong sign.
+    OutOfRange(&'static str, f64, &'static str),
 }
 
 impl std::fmt::Display for SpecError {
@@ -46,6 +67,9 @@ impl std::fmt::Display for SpecError {
             }
             SpecError::NotPositive(key, value) => {
                 write!(f, "robot {key} must be a positive number, got {value}")
+            }
+            SpecError::OutOfRange(key, value, rule) => {
+                write!(f, "robot {key} must be {rule}, got {value}")
             }
         }
     }
@@ -69,9 +93,33 @@ impl RobotSpec {
             Ok(value)
         };
 
+        // Robots stored before the physical spec existed carry only `max_velocity`, in cells
+        // per tick. Convert it *up* into a metric speed rather than carrying both: the rest of
+        // the system then reads one number whatever the row's vintage, and the legacy key can
+        // eventually be dropped without anything downstream noticing.
+        //
+        // Keyed on the absence of `max_linear_vel` rather than on a version flag, so a row
+        // that gains the new key stops consulting the old one from that moment — the two can
+        // never both be authoritative, which is the whole point.
+        //
+        // Read *before* `task_interval` even though the conversion below needs both, because
+        // the order these are checked in is API-visible: capabilities missing everything has
+        // always been reported against `max_velocity`, and clients read that message.
+        let legacy_cells_per_tick = match capabilities.get(MAX_LINEAR_VEL) {
+            Some(_) => None,
+            None => Some(read(MAX_VELOCITY)?),
+        };
+
+        let task_interval = read(TASK_INTERVAL)?;
+        let mut body = UnicycleSpec::from_capabilities(capabilities)?;
+        if let Some(cells_per_tick) = legacy_cells_per_tick {
+            body.max_linear_vel = cells_per_tick * METERS_PER_CELL / task_interval;
+        }
+
         Ok(Self {
-            max_velocity: read(MAX_VELOCITY)?,
-            task_interval: read(TASK_INTERVAL)?,
+            max_velocity: body.max_linear_vel * task_interval / METERS_PER_CELL,
+            task_interval,
+            body,
         })
     }
 }
@@ -194,6 +242,97 @@ mod tests {
                 "{bad} should not drive a run",
             );
         }
+    }
+
+    #[test]
+    fn an_empty_blob_is_reported_against_max_velocity_first() {
+        // The order the two required keys are checked in is API-visible — clients read the
+        // message — so it is a contract, not an implementation detail. Pinned here as well as
+        // in tests/test_routes.rs because reordering the reads is an easy, silent change and
+        // an integration suite needing Postgres is a slow way to find out.
+        let err = RobotSpec::from_capabilities(&serde_json::json!({})).unwrap_err();
+        assert!(
+            err.to_string().contains(MAX_VELOCITY),
+            "an empty blob should name max_velocity, got {err}",
+        );
+
+        let err = RobotSpec::from_capabilities(&serde_json::json!({ "max_velocity": 1 }))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(TASK_INTERVAL),
+            "with a velocity present the next missing key is task_interval, got {err}",
+        );
+    }
+
+    #[test]
+    fn a_metric_speed_is_converted_into_cells_per_tick() {
+        // The derivation that replaced a stored `max_velocity`. 2 m/s for half a second is
+        // one metre, which at the current scale is one cell.
+        let spec = RobotSpec::from_capabilities(&serde_json::json!({
+            "max_velocity": 99,          // present but stale: must lose to the metric speed
+            "task_interval": 0.5,
+            "max_linear_vel": 2.0,
+        }))
+        .unwrap();
+
+        assert_eq!(spec.body.max_linear_vel, 2.0);
+        assert_eq!(
+            spec.max_velocity,
+            2.0 * 0.5 / METERS_PER_CELL,
+            "the stale stored velocity won over the physical spec",
+        );
+    }
+
+    #[test]
+    fn a_robot_stored_before_the_physical_spec_still_runs() {
+        // Every row in the fleet predates `max_linear_vel`, so the legacy path is not an edge
+        // case — it is what the whole database takes today. The conversion has to be exact in
+        // both directions, or upgrading the code would silently re-speed every stored robot.
+        let legacy = RobotSpec::from_capabilities(&serde_json::json!({
+            "max_velocity": 1.5,
+            "task_interval": 0.5,
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.max_velocity, 1.5, "a stored velocity must survive the round trip");
+        assert_eq!(
+            legacy.body.max_linear_vel,
+            1.5 * METERS_PER_CELL / 0.5,
+            "cells per tick should have been read up into m/s",
+        );
+        // Everything the legacy row says nothing about falls back to the default machine.
+        assert_eq!(legacy.body.track_width, UnicycleSpec::default().track_width);
+    }
+
+    #[test]
+    fn the_two_velocities_can_never_disagree() {
+        // The property the derivation exists for. Whichever key a row carries, the metric
+        // speed and the cells-per-tick speed describe one machine — so converting either way
+        // and back has to land where it started, for any plausible robot.
+        for &(metric, interval) in &[(2.0, 0.5), (0.25, 2.0), (3.3, 0.1), (1.0, 1.0)] {
+            let spec = RobotSpec::from_capabilities(&serde_json::json!({
+                "task_interval": interval,
+                "max_linear_vel": metric,
+            }))
+            .unwrap();
+            let round_tripped = spec.max_velocity * METERS_PER_CELL / spec.task_interval;
+            assert!(
+                (round_tripped - metric).abs() < 1e-12,
+                "{metric} m/s at {interval}s came back as {round_tripped}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_physical_spec_is_reported_rather_than_defaulted() {
+        // The physical keys are optional, but not arbitrary: a robot is refused at the API
+        // boundary through this same function, so a nonsense track width has to surface here.
+        assert!(
+            RobotSpec::from_capabilities(&serde_json::json!({
+                "max_velocity": 1, "task_interval": 0.5, "track_width": 0,
+            }))
+            .is_err(),
+        );
     }
 
     #[test]

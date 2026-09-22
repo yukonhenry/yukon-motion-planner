@@ -37,9 +37,9 @@
 //! a slow search never stalls the environment behind it.
 
 use crate::models::obstacle::ObstaclePoly;
-use crate::models::planners::PlannerKind;
+use crate::models::planners::{PlannerContext, PlannerKind};
 use crate::models::robot::{RobotBody, RobotSpec};
-use crate::models::simulation::{SimWorld, plan_route};
+use crate::simulators::simulation::{SimWorld, plan_route};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -289,7 +289,8 @@ impl SimRegistry {
             Arc::clone(&world),
             events.clone(),
             robot_period,
-            spec.max_velocity,
+            spec,
+            seed,
             grid_id,
             // Weak, not strong: the registry owns the run, which owns this task's handle, so
             // a strong reference back would be a cycle that never frees a finished run.
@@ -449,7 +450,9 @@ async fn robot_task(
     world: Arc<Mutex<SimWorld>>,
     events: broadcast::Sender<SimEvent>,
     period: Duration,
-    max_velocity: f64,
+    spec: RobotSpec,
+    // The run's seed, so a sampling planner's choices replay with the rest of the run.
+    seed: u64,
     grid_id: i32,
     registry: std::sync::Weak<SimRegistry>,
 ) {
@@ -470,7 +473,7 @@ async fn robot_task(
             // The route was planned against the world at the last replan; obstacles have had
             // ticks of their own since, so the robot re-checks each cell as it steps rather
             // than trusting a plan the world has moved on from.
-            let moved = world.step_robot(max_velocity);
+            let moved = world.step_robot(spec.max_velocity);
             let (position, arrived) = world.robot_at();
             let (obstacles, env_tick) = world.snapshot();
             (moved, position, arrived, obstacles, env_tick, world.width, world.height)
@@ -496,7 +499,22 @@ async fn robot_task(
         };
         let outcome = tokio::task::spawn_blocking(move || {
             // D* Lite specifically: replanning a world that just changed is what it is for.
-            plan_route(width, height, &obstacles, position, dest, PlannerKind::DStarLite)
+            // The robot is named rather than a clearance passed: whether obstacles get grown
+            // depends on which planner runs, and only the planner knows that.
+            plan_route(
+                width,
+                height,
+                &obstacles,
+                position,
+                dest,
+                PlannerKind::DStarLite,
+                PlannerContext {
+                    robot: Some(spec.body),
+                    // Derived from the tick so a sampling planner explores differently each
+                    // replan, while a run as a whole still replays from its own seed.
+                    seed: seed ^ tick.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                },
+            )
         })
         .await;
 
@@ -540,6 +558,7 @@ async fn robot_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::robots::unicycle_spec::UnicycleSpec;
     use crate::models::obstacle::CellVertex;
 
     fn square(dynamic: bool) -> ObstaclePoly {
@@ -563,6 +582,7 @@ mod tests {
         RobotSpec {
             max_velocity: 1.0,
             task_interval,
+            body: UnicycleSpec::default(),
         }
     }
 

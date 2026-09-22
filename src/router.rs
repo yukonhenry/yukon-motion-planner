@@ -7,6 +7,7 @@ use crate::handlers::plan_crud::{
 use crate::handlers::robot_crud::{
     create_robot, delete_robot, list_robots, show_robot, update_robot,
 };
+use crate::handlers::search_trace::search_trace;
 use crate::handlers::sim::{show_sim, start_sim, stop_sim, stream_sim};
 use crate::scheduler::SimRegistry;
 use axum::{Router, routing};
@@ -55,6 +56,9 @@ pub async fn route(db: DatabaseConnection) -> Router {
         // evolving geometry and the grid row stays the initial condition, so a run does not
         // freeze the grid or leave a plan row per frame.
         .route("/grids/{id}/replan", routing::post(replan_grid))
+        // Not part of a run: one SST search, recorded, so a client can scrub through how the
+        // tree grew and what sparsification culled. Stores nothing and moves nothing.
+        .route("/grids/{id}/search-trace", routing::post(search_trace))
         // A backend-driven run of the same simulation: the environment and the replanner as
         // two tasks on two frequencies, rather than one tick per click. `start` hands a saved
         // grid and one of its plans to the scheduler; `stream` is how the browser watches.

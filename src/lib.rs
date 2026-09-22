@@ -5,3 +5,5 @@ pub mod router;
 
 pub mod handlers;
 pub mod scheduler;
+
+pub mod simulators;
