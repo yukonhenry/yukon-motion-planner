@@ -3,10 +3,12 @@ import type {
   GridDetail,
   GridInput,
   Plan,
-  Robot,
-  RobotInput,
   ReplanInput,
   ReplanResult,
+  Robot,
+  RobotInput,
+  SearchTrace,
+  SearchTraceInput,
   SimStatus,
   StartSimInput,
   Vertex,
@@ -138,6 +140,24 @@ export const deletePlan = (planId: number) =>
  */
 export const replan = (gridId: number, input: ReplanInput) =>
   request<ReplanResult>(`/grids/${gridId}/replan`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+// --- search traces -------------------------------------------------------
+
+/**
+ * Runs one SST search and returns how it went, without storing or moving anything.
+ *
+ * A debugging and teaching call rather than part of a run: the response is a fixed timeline a
+ * client scrubs over, not a stream. Passing the same `seed` back draws the identical picture,
+ * which is what makes a search worth studying shareable.
+ *
+ * Takes noticeably longer than the other calls — the server runs a real search, a few hundred
+ * milliseconds at the default budget — so a caller should show that it is working.
+ */
+export const searchTrace = (gridId: number, input: SearchTraceInput) =>
+  request<SearchTrace>(`/grids/${gridId}/search-trace`, {
     method: "POST",
     body: JSON.stringify(input),
   });

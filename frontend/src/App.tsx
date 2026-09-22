@@ -6,9 +6,12 @@ import { ObstacleList } from "./components/ObstacleList";
 import { RobotPanel } from "./components/RobotPanel";
 import { RoutePanel } from "./components/RoutePanel";
 import { SavePanel } from "./components/SavePanel";
+import { SearchTracePanel } from "./components/SearchTracePanel";
 import { SimPanel } from "./components/SimPanel";
 import { MIN_VERTICES, validateObstacles, validateVertices } from "./geometry";
 import { draftToInput, fromWire, toWire, useGridDraft } from "./hooks/useGridDraft";
+import { useSearchTrace } from "./hooks/useSearchTrace";
+import { iterationAt, treeAt } from "./searchTrace";
 import { useGrids } from "./hooks/useGrids";
 import { useRobots } from "./hooks/useRobots";
 import { usePlans } from "./hooks/usePlans";
@@ -290,6 +293,14 @@ export default function App() {
    * user drew; this is only what is on screen.
    */
   const shownObstacles = live.run?.obstacles ?? sim?.obstacles ?? draft?.obstacles ?? [];
+
+  // The replayed search. Recomputed from the event list each frame rather than stepped, so
+  // scrubbing backwards is exactly as correct as scrubbing forwards — see ../searchTrace.ts.
+  const tracePlayer = useSearchTrace(gridId);
+  const traceFrame = useMemo(
+    () => treeAt(tracePlayer.trace?.events ?? [], tracePlayer.frame),
+    [tracePlayer.trace, tracePlayer.frame],
+  );
   const dynamicCount = shownObstacles.filter((o) => o.dynamic).length;
 
   /** The plan a backend run is anchored to, which is where its endpoints come from. */
@@ -567,6 +578,26 @@ export default function App() {
           />
         )}
 
+        {draft && (
+          <SearchTracePanel
+            player={tracePlayer}
+            canRun={marks.src !== null && marks.dest !== null}
+            onRun={() => {
+              if (!marks.src || !marks.dest) return;
+              void tracePlayer.run({
+                src_vertex: marks.src,
+                dest_vertex: marks.dest,
+                obs_polygons: shownObstacles.map(toWire),
+                ...(driverId !== null ? { robot_id: driverId } : {}),
+              });
+            }}
+            live={traceFrame.live.length}
+            pruned={traceFrame.pruned.length}
+            iteration={iterationAt(tracePlayer.trace?.events ?? [], tracePlayer.frame)}
+            bestCost={traceFrame.bestCost}
+          />
+        )}
+
         {selectedId !== null && (
           <p className="muted hint">
             Drag the shape to move it, or drag a handle to reshape it. Delete removes it.
@@ -613,6 +644,20 @@ export default function App() {
             // obstacles, not machines.
             robot={live.run?.robotPosition ?? null}
             showFootprint={showFootprint}
+            search={
+              tracePlayer.trace && {
+                metersPerCell: tracePlayer.trace.meters_per_cell,
+                live: traceFrame.live,
+                pruned: traceFrame.pruned,
+                witnesses: traceFrame.witnesses,
+                // Only once the replay has reached the point the solution was found — showing
+                // it from the first frame would give away the answer the tree is looking for.
+                solution:
+                  traceFrame.bestCost === null ? null : tracePlayer.trace.solution,
+                showGhosts: tracePlayer.showGhosts,
+                showWitnesses: tracePlayer.showWitnesses,
+              }
+            }
           />
         )}
       </main>
