@@ -6,6 +6,7 @@ import {
   gridPixelHeight,
   gridPixelWidth,
   isClosedRing,
+  metersToPixel,
   obstacleHue,
   pixelToCell,
   rasterizePolygon,
@@ -14,7 +15,8 @@ import {
   translatePolygon,
   verticesToPixels,
 } from "../geometry";
-import type { Endpoint, GridSize, Obstacle, Vertex } from "../types";
+import type { Endpoint, GridSize, Obstacle, Pose, Vertex } from "../types";
+import type { TraceEdge } from "../searchTrace";
 
 /**
  * The only module in the app that knows SVG exists.
@@ -55,6 +57,30 @@ interface Props {
   robot: Vertex | null;
   /** Shade the cells the planner actually blocks, not just the drawn outline. */
   showFootprint: boolean;
+  /**
+   * An SST search being replayed over the top, or `null` when none is.
+   *
+   * Metric rather than cell-based, unlike everything else drawn here: a kinodynamic tree is a
+   * bundle of curves through continuous space, and the reason to look at it is precisely the
+   * part a cell index cannot express. `metersPerCell` comes from the server with the trace, so
+   * the two halves cannot disagree about the scale.
+   */
+  search: SearchOverlay | null;
+}
+
+/** What a replayed search looks like at one moment. See ../searchTrace.ts. */
+export interface SearchOverlay {
+  metersPerCell: number;
+  /** Edges currently in the tree. */
+  live: TraceEdge[];
+  /** Edges sparsification has culled — the thing that makes SST not RRT. */
+  pruned: TraceEdge[];
+  /** Witness centres, in metres. */
+  witnesses: [number, number][];
+  /** The best trajectory so far, in metres, or `null` before one was found. */
+  solution: Pose[] | null;
+  showGhosts: boolean;
+  showWitnesses: boolean;
 }
 
 /** An in-flight drag. Held in state, but it only changes when the *cell* changes. */
@@ -78,6 +104,25 @@ const cellsToPath = (cells: Vertex[]) =>
     .map(([x, y]) => `M${x * CELL_SIZE} ${y * CELL_SIZE}h${CELL_SIZE}v${CELL_SIZE}h${-CELL_SIZE}z`)
     .join("");
 
+/**
+ * A bundle of metric polylines as one <path> of subpaths.
+ *
+ * One element for the whole tree rather than one per edge, for the same reason `cellsToPath`
+ * is one: a search is hundreds of edges, and that many <polyline>s is that many DOM nodes to
+ * lay out on every frame of a scrub.
+ */
+const posesToPath = (edges: { path: Pose[] }[], metersPerCell: number) =>
+  edges
+    .map(({ path }) =>
+      path
+        .map(
+          ([x, y], index) =>
+            `${index === 0 ? "M" : "L"}${metersToPixel(x, metersPerCell).toFixed(2)} ${metersToPixel(y, metersPerCell).toFixed(2)}`,
+        )
+        .join(""),
+    )
+    .join("");
+
 const toPoints = (vertices: Vertex[]) =>
   verticesToPixels(vertices)
     .map(([x, y]) => `${x},${y}`)
@@ -98,6 +143,7 @@ export function GridCanvas({
   route,
   robot,
   showFootprint,
+  search,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -329,6 +375,35 @@ export function GridCanvas({
             </text>
           </g>
         ) : null,
+      )}
+
+      {/* Under the endpoints and the robot, over the obstacles: the tree is context for
+          where the plan came from, not the thing being tracked. */}
+      {search && (
+        <g className="search" style={{ pointerEvents: "none" }}>
+          {search.showWitnesses &&
+            search.witnesses.map(([x, y], index) => (
+              <circle
+                key={index}
+                cx={metersToPixel(x, search.metersPerCell)}
+                cy={metersToPixel(y, search.metersPerCell)}
+                r={2}
+                className="search__witness"
+              />
+            ))}
+          {search.showGhosts && search.pruned.length > 0 && (
+            <path d={posesToPath(search.pruned, search.metersPerCell)} className="search__ghost" />
+          )}
+          {search.live.length > 0 && (
+            <path d={posesToPath(search.live, search.metersPerCell)} className="search__edge" />
+          )}
+          {search.solution && search.solution.length > 1 && (
+            <path
+              d={posesToPath([{ path: search.solution }], search.metersPerCell)}
+              className="search__solution"
+            />
+          )}
+        </g>
       )}
 
       {robot && (

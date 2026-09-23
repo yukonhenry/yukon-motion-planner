@@ -20,8 +20,8 @@
 
 use crate::entities::{grid_world_states, robots, route_plans};
 use crate::handlers::helpers::{AppError, find_grid};
-use crate::models::robot::RobotSpec;
 use crate::models::obstacle::ObstaclePoly;
+use crate::models::robot::RobotSpec;
 use crate::router::AppState;
 use crate::scheduler::{SimStatus, StartError};
 use axum::Json;
@@ -50,7 +50,6 @@ pub(crate) struct StartInput {
     /// run stops replaying with nothing looking wrong.
     seed: Option<u32>,
 }
-
 
 
 impl From<StartError> for AppError {

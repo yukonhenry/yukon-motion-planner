@@ -4,3 +4,4 @@ frontend/dist
 .env
 migration/target/
 
+/out

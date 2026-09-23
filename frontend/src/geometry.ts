@@ -30,6 +30,20 @@ export const cellToPixel = (cell: number) => cell * CELL_SIZE + CELL_SIZE / 2;
 /** Inverse of {@link cellToPixel}: which cell does this pixel offset fall in? */
 export const pixelToCell = (pixel: number) => Math.floor(pixel / CELL_SIZE);
 
+/**
+ * A metric coordinate in pixels.
+ *
+ * The third coordinate system in the app, and the one that only kinodynamic output needs:
+ * cells for everything authored, metres for everything integrated, pixels for what is drawn.
+ * `metersPerCell` comes from the server with the trace rather than being hardcoded here, so
+ * the two halves cannot drift — see `METERS_PER_CELL` in src/models/scale.rs.
+ *
+ * No half-cell offset, unlike {@link cellToPixel}: a metric coordinate is already an exact
+ * position rather than an index standing for a whole cell.
+ */
+export const metersToPixel = (meters: number, metersPerCell: number) =>
+  (meters / metersPerCell) * CELL_SIZE;
+
 export const verticesToPixels = (vertices: Vertex[]): [number, number][] =>
   vertices.map(([x, y]) => [cellToPixel(x), cellToPixel(y)]);
 

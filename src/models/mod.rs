@@ -4,4 +4,6 @@ pub mod obstacle;
 pub mod planners;
 pub mod rng;
 pub mod robot;
-pub mod simulation;
+pub mod scale;
+pub mod kino_dynamic_base;
+pub mod robots;

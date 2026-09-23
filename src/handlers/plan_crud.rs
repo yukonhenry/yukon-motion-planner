@@ -4,10 +4,10 @@ use crate::handlers::helpers::{AppError, find_grid, record_state};
 use crate::models::cell::Cell;
 use crate::models::grid_world_manager::GridWorldManager;
 use crate::models::obstacle::{ObstaclePoly, advance_one_tick};
-use crate::models::planners::{PlanError, PlannerKind};
+use crate::models::planners::{PlanError, PlannerContext, PlannerKind};
 use crate::models::rng::Xorshift;
-use crate::models::simulation::plan_route;
 use crate::router::AppState;
+use crate::simulators::simulation::plan_route;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -135,7 +135,10 @@ pub(crate) async fn generate_grid_plan(
     // One value picks both the search and the name recorded below. Once `PlanInput` carries a
     // planner this is the field, and nothing else in here changes.
     let kind = PlannerKind::AStar;
-    let mut planner = kind.planner();
+    let mut planner = kind.planner(PlannerContext {
+        robot: None,
+        seed: 0,
+    });
 
     let optimal_path =
         match grid_world.find_plan(payload.src_vertex, payload.dest_vertex, planner.as_mut()) {
@@ -265,8 +268,14 @@ pub(crate) async fn replan_grid(
         payload.src_vertex,
         payload.dest_vertex,
         PlannerKind::DStarLite,
+        // No robot on this path: a manual tick is the browser driving the world by hand, so
+        // nothing is cleared and the plan is for a point, which is what it draws.
+        PlannerContext {
+            robot: None,
+            seed: 0,
+        },
     )
-        .map_err(|err| AppError::Invalid(err.to_string()))?;
+    .map_err(|err| AppError::Invalid(err.to_string()))?;
 
     Ok(Json(ReplanOutput {
         obs_polygons: obstacles,

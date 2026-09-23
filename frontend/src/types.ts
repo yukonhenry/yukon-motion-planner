@@ -310,3 +310,95 @@ export interface StartSimInput {
   /** Omit to start somewhere arbitrary — the response reports where. */
   seed?: number;
 }
+
+// --- SST search traces ----------------------------------------------------
+
+/**
+ * One pose along a trajectory: `[x, y, theta]`, metres and radians.
+ *
+ * Metric, not cells. A kinodynamic plan is a curve through continuous space, and the whole
+ * reason to draw it is the part a cell index cannot express — where between two cells the
+ * robot is, and which way it is pointing. {@link SearchTrace.meters_per_cell} is what puts it
+ * back on the grid.
+ */
+export type Pose = [number, number, number];
+
+/**
+ * One thing that happened to the search tree, mirroring `SearchEvent` in
+ * src/models/planners/rrt/sst.rs.
+ *
+ * In the order it happened, and complete: every node arrives after its parent and every prune
+ * names a node added earlier, so applying a prefix in order always yields a drawable tree.
+ */
+export type SearchEvent =
+  | {
+      type: "node_added";
+      iteration: number;
+      id: number;
+      parent: number;
+      /** Thinned to a handful of poses — enough for the curve, not every integration step. */
+      path: Pose[];
+      /** Cost-to-come, in seconds. */
+      cost: number;
+    }
+  | {
+      /**
+       * Sparsification culled a node: something cheaper took its witness and nothing was
+       * descended from it. This is the event that distinguishes SST from a plain kinodynamic
+       * RRT, and the one the player exists to show.
+       */
+      type: "node_pruned";
+      iteration: number;
+      id: number;
+    }
+  | { type: "witness_added"; iteration: number; x: number; y: number }
+  | { type: "solution_improved"; iteration: number; cost: number };
+
+/** What one search cost, mirroring `TraceStats` in src/handlers/search_trace.rs. */
+export interface TraceStats {
+  iterations: number;
+  nodes: number;
+  nodes_created: number;
+  nodes_pruned: number;
+  witnesses: number;
+  collision_queries: number;
+  extensions_failed: number;
+  dominated: number;
+  selection_fallbacks: number;
+  selection_ms: number;
+  propagation_ms: number;
+  bookkeeping_ms: number;
+  total_ms: number;
+  /** Metres. Well above the goal radius on a search that never arrived. */
+  closest_approach: number;
+  /** `[iteration, elapsed_ms, cost_seconds]` each time the best solution improved. */
+  improvements: [number, number, number][];
+}
+
+/** Body of `POST /grids/{id}/search-trace`. */
+export interface SearchTraceInput {
+  src_vertex: Vertex;
+  dest_vertex: Vertex;
+  /** Sent rather than read from the stored row, so a moving world can be traced as drawn. */
+  obs_polygons: WireObstacle[];
+  robot_id?: number;
+  /** Omit for an arbitrary search; the response reports which seed was used. */
+  seed?: number;
+  iterations?: number;
+}
+
+/** What `POST /grids/{id}/search-trace` answers with. Nothing is stored. */
+export interface SearchTrace {
+  events: SearchEvent[];
+  stats: TraceStats;
+  /** The best trajectory found. Empty when the goal was never reached. */
+  solution: Pose[];
+  solution_cost: number;
+  reachable: boolean;
+  start: Pose;
+  goal: [number, number];
+  /** Metres per cell, for placing everything above on the grid this app already draws. */
+  meters_per_cell: number;
+  /** The seed actually used, so this exact picture can be asked for again. */
+  seed: number;
+}

@@ -4,7 +4,10 @@ pub(crate) mod a_star;
 pub(crate) mod d_star_lite;
 pub(crate) mod movement_model;
 
+pub(crate) mod rrt;
+
 use crate::models::cell::Cell;
+use crate::models::robots::unicycle_spec::UnicycleSpec;
 use crate::models::grid_world_manager::{GridWorldManager, NodeId};
 use std::fmt;
 
@@ -68,6 +71,40 @@ pub(crate) enum PlannerKind {
     /// point. `POST /grids/{id}/plans` still hardcodes `AStar`; letting a client choose means
     /// giving `PlanInput` a `planner` field.
     DStarLite,
+    /// Stable Sparse RRT over the second-order unicycle.
+    ///
+    /// The odd one out, and worth knowing how. The other two search the grid for the cheapest
+    /// 8-connected path and are exact about it; this one samples trajectories that obey the
+    /// robot's acceleration and wheel-speed limits, and minimizes *duration* rather than grid
+    /// cost. Its route is therefore usually dearer by `path_cost` and is not meant to be
+    /// compared on that number — the comparison it exists for is whether the machine can
+    /// actually drive the answer.
+    ///
+    /// `allow(dead_code)`: dispatch is complete and the tests select it, but no endpoint
+    /// offers it yet. Two things are needed before one can, and the second is the reason this
+    /// is not simply switched on — a `planner` field on `PlanInput`, and a `spawn_blocking`
+    /// around the search in `generate_grid_plan`, which today runs inline. A* returns in
+    /// microseconds so inline is fine; SST takes on the order of a second and would hold a
+    /// runtime worker for all of it.
+    #[allow(dead_code)]
+    Sst,
+}
+
+/// What a planner needs beyond the grid itself.
+///
+/// A struct rather than more arguments because only one planner reads either field, and a
+/// signature that grew a parameter per planner would make adding the next one a change to
+/// every call site.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlannerContext {
+    /// The machine being planned for, where one is known.
+    ///
+    /// `None` on the manual replan path, which the browser drives by hand with no robot in it.
+    /// A kinodynamic planner asked to run without one falls back to the default machine rather
+    /// than refusing, since some body has to be integrated and the default is a real robot.
+    pub robot: Option<UnicycleSpec>,
+    /// Seed for planners that sample; ignored by the deterministic ones.
+    pub seed: u64,
 }
 
 impl PlannerKind {
@@ -77,6 +114,22 @@ impl PlannerKind {
         match self {
             PlannerKind::AStar => "a_star",
             PlannerKind::DStarLite => "d_star_lite",
+            PlannerKind::Sst => "sst",
+        }
+    }
+
+    /// Whether the obstacles should be grown by the robot's radius before this planner sees
+    /// them.
+    ///
+    /// True for the grid planners, which search as a point and need the clearance baked into
+    /// the world to be a correct model of a body. False for [`Sst`](PlannerKind::Sst), which
+    /// sweeps the real shape through continuous space and would be clearing the same radius
+    /// twice — walling off gaps the robot fits through — if it were handed an inflated grid
+    /// as well.
+    pub(crate) fn inflates_obstacles(self) -> bool {
+        match self {
+            PlannerKind::AStar | PlannerKind::DStarLite => true,
+            PlannerKind::Sst => false,
         }
     }
 
@@ -84,10 +137,14 @@ impl PlannerKind {
     /// database `await`, and a future holding a non-`Send` value is not `Send` itself. Axum
     /// reports that as "`generate_grid_plan` does not implement `Handler`", which points
     /// nowhere near the cause — hence the bound here rather than a puzzle later.
-    pub(crate) fn planner(self) -> Box<dyn Planner + Send> {
+    pub(crate) fn planner(self, context: PlannerContext) -> Box<dyn Planner + Send> {
         match self {
             PlannerKind::AStar => Box::new(a_star::AStar),
             PlannerKind::DStarLite => Box::new(d_star_lite::DStarLite),
+            PlannerKind::Sst => Box::new(rrt::grid_adapter::Sst::new(
+                context.robot.unwrap_or_default(),
+                context.seed,
+            )),
         }
     }
 }
@@ -96,24 +153,64 @@ impl PlannerKind {
 mod tests {
     use super::*;
 
-    /// Every variant dispatches to something that plans, under a name no other variant shares.
+    /// Every kind there is. Listed once so a new variant is one edit, and the tests below
+    /// cannot silently stop covering it.
+    const ALL: [PlannerKind; 3] = [PlannerKind::AStar, PlannerKind::DStarLite, PlannerKind::Sst];
+
+    /// Every variant dispatches under a name no other variant shares.
     ///
     /// The name is what a stored plan carries, so a collision would make two planners
     /// indistinguishable after the fact — and a variant wired to the wrong arm of `planner()`
     /// would record one planner's name against another's route.
     #[test]
     fn every_planner_kind_dispatches_under_a_distinct_name() {
-        let kinds = [PlannerKind::AStar, PlannerKind::DStarLite];
-
-        let mut names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
+        let mut names: Vec<&str> = ALL.iter().map(|kind| kind.name()).collect();
         let before = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), before, "two planners share a meta name");
+    }
 
-        let world = test_support::empty_world(4, 4);
-        for kind in kinds {
-            let mut planner = kind.planner();
+    /// Every variant produces a walkable route between two open cells.
+    ///
+    /// The weakest property they all share, and deliberately weak: it says a plan connects its
+    /// endpoints over passable ground, not that it is the cheapest such plan. Optimality is
+    /// asserted separately below, for the planners that actually claim it.
+    #[test]
+    fn every_planner_kind_returns_a_route_between_open_cells() {
+        for kind in ALL {
+            let world = test_support::empty_world(12, 12);
+            let mut planner = kind.planner(PlannerContext {
+                robot: None,
+                seed: 3,
+            });
+            let route = world
+                .find_plan([1, 1], [9, 9], planner.as_mut())
+                .unwrap_or_else(|err| panic!("{} could not cross an open grid: {err}", kind.name()));
+
+            assert_eq!(route.first(), Some(&world.id(1, 1)), "{}", kind.name());
+            assert_eq!(route.last(), Some(&world.id(9, 9)), "{}", kind.name());
+            for &node in &route {
+                assert!(world.passable(node), "{} crossed a blocked cell", kind.name());
+            }
+        }
+    }
+
+    /// The grid planners find the *cheapest* 8-connected route, and agree on its price.
+    ///
+    /// Scoped to those two on purpose. [`PlannerKind::Sst`] is not in this list because it is
+    /// not solving this problem: it minimizes the time a robot with real acceleration and
+    /// wheel-speed limits needs, over a continuous space, and its route is a curve that
+    /// happens to be projected onto cells afterwards. Holding it to an octile optimum would
+    /// assert that a car should corner like a chess knight.
+    #[test]
+    fn the_grid_planners_find_the_cheapest_route() {
+        for kind in [PlannerKind::AStar, PlannerKind::DStarLite] {
+            let world = test_support::empty_world(4, 4);
+            let mut planner = kind.planner(PlannerContext {
+                robot: None,
+                seed: 0,
+            });
             let route = world.find_plan([0, 0], [3, 3], planner.as_mut());
             assert_eq!(
                 route.map(|route| world.path_cost(&route)),
@@ -122,6 +219,21 @@ mod tests {
                 kind.name(),
             );
         }
+    }
+
+    /// Only the planners that search as a point ask for the obstacles to be grown.
+    ///
+    /// Pinned because getting it backwards is invisible: an inflated grid handed to the
+    /// kinodynamic planner clears the robot's radius twice and quietly seals gaps it fits
+    /// through, while an uninflated one handed to a grid planner lets a body clip corners.
+    #[test]
+    fn only_the_point_searchers_inflate_their_obstacles() {
+        assert!(PlannerKind::AStar.inflates_obstacles());
+        assert!(PlannerKind::DStarLite.inflates_obstacles());
+        assert!(
+            !PlannerKind::Sst.inflates_obstacles(),
+            "SST sweeps a real body and must not also be given inflated obstacles",
+        );
     }
 }
 

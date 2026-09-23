@@ -20,6 +20,8 @@ tokio-stream = { version = "0.1.19", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 migration = { path = "migration" }
+rapier2d = "0.35.3"
+rand = "0.8.7"
 
 [dev-dependencies]
 reqwest = { version = "0.13.4", features = ["json"] }

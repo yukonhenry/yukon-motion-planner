@@ -495,3 +495,62 @@ button.subtle {
   border-left: 3px solid #f9d423;
   padding-left: 0.5rem;
 }
+
+/* --- SST search trace ---------------------------------------------------- */
+
+/* The tree is context, not the subject: thin, semi-transparent, and under everything the eye
+   is actually tracking. Hundreds of edges at full opacity read as a smear. */
+.search__edge {
+  fill: none;
+  stroke: rgb(120 180 255 / 0.55);
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* Culled branches, behind the live tree. Faint enough to read as absence rather than as more
+   tree — what they show is where the search went and gave up, which is the whole difference
+   between SST and a plain kinodynamic RRT. */
+.search__ghost {
+  fill: none;
+  stroke: rgb(140 140 150 / 0.22);
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* The best trajectory so far. Deliberately the heaviest stroke in the overlay: it is the one
+   line in the picture that is an answer rather than a search. */
+.search__solution {
+  fill: none;
+  stroke: #ff9f43;
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.search__witness {
+  fill: rgb(255 255 255 / 0.3);
+}
+
+/* Definition list used for the trace's counters. Two columns so labels and values line up
+   down the sidebar rather than wrapping into each other. */
+.stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+}
+
+.stats dt {
+  color: var(--muted, #8a8a94);
+}
+
+.stats dd {
+  margin: 0;
+}
+
+button.is-active {
+  outline: 2px solid var(--route, #35d6a4);
+}
