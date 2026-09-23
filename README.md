@@ -30,7 +30,8 @@ Backend is built in Rust, using Axum/SeaORM/Postgres. Frontend built in React/Ty
 * Visualization of not only the planning result, but also the planning process and topological/geometric properties of
   the configuration space
 * Moving/Varying obstacles and Temporal planning
-* Actuator Dynamics
+* Actuator Dynamics and Kinodynamic constraints
 * Uncertainty modeling
-* 3D planning
+* 3D/Multi-dimensional planning
+* Multi-robot planning
 * Host the backend
